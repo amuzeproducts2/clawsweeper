@@ -14620,7 +14620,7 @@ test("runCodex preserves redacted process output when Codex exits without a deci
     codexPath,
     `#!/usr/bin/env node
 process.stdout.write("startup banner GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\\n");
-process.stderr.write("Rate limit reached for gpt-test on tokens per min (TPM); OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz123456\\n");
+process.stderr.write("Rate limit reached for gpt-test on tokens per min (TPM); OPENAI_API_KEY=sk-proj-REDACTED_TEST_FIXTURE\\n");
 process.exit(1);
 `,
   );

@@ -17,7 +17,7 @@ test("collectCodexDebug copies recent Codex session logs and excludes auth files
   const logPath = path.join(codexHome, "log", "codex-tui.log");
   fs.writeFileSync(
     sessionPath,
-    'prompt sk-proj-abcdefghijklmnopqrstuvwxyz\n{"model":"secret-model-for-test"}\n',
+    'prompt sk-proj-REDACTED_TEST_FIXTURE\n{"model":"secret-model-for-test"}\n',
   );
   fs.writeFileSync(logPath, "GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz123456\n");
   fs.writeFileSync(path.join(codexHome, "auth.json"), '{"OPENAI_API_KEY":"sk-secret"}\n');
@@ -185,7 +185,7 @@ test("redactSecrets masks common token shapes", () => {
   assert.equal(
     redactSecrets(
       [
-        "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz",
+        "OPENAI_API_KEY=sk-proj-REDACTED_TEST_FIXTURE",
         '"GITHUB_TOKEN":"github_pat_abcdefghijklmnopqrstuvwxyz123456"',
         "token ghp_abcdefghijklmnopqrstuvwxyz123456",
       ].join("\n"),

@@ -223,11 +223,9 @@ function listOpenPullRequestNumbers(repo, maxPages) {
     "--limit",
     String(limit),
     "--json",
-    "number,updatedAt",
-    "--jq",
-    "sort_by(.updatedAt) | reverse | map(.number)",
+    "number,updatedAt,author,isDraft,mergeable,reviewDecision",
   ]);
-  return prs;
+  return prs.sort((left, right) => prPriority(left) - prPriority(right)).map((pr) => pr.number);
 }
 
 function repoDefaultBranch(repo) {
@@ -375,7 +373,11 @@ function sensitivePathReason(path) {
   if (/^\.github\/workflows\//i.test(path)) return "GitHub Actions workflow changed";
   if (/(^|\/)(Dockerfile|docker-compose\.ya?ml)$/i.test(path))
     return "runtime/container config changed";
-  if (/(^|\/)(package-lock|pnpm-lock|yarn\.lock|poetry\.lock|Gemfile\.lock)$/i.test(path)) {
+  if (
+    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|yarn\.lock|poetry\.lock|Gemfile\.lock)$/i.test(
+      path,
+    )
+  ) {
     return "dependency lockfile changed";
   }
   if (
@@ -537,7 +539,9 @@ function inspectPr(repo, number) {
 function dependencyBumpPath(path) {
   return (
     /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(path) ||
-    /(^|\/)(package-lock|pnpm-lock|yarn\.lock|poetry\.lock|Gemfile\.lock)$/i.test(path) ||
+    /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.ya?ml|yarn\.lock|poetry\.lock|Gemfile\.lock)$/i.test(
+      path,
+    ) ||
     /(^|\/)(package\.json|pyproject\.toml|requirements.*\.txt|Gemfile|go\.mod|Cargo\.toml)$/i.test(
       path,
     )
@@ -634,6 +638,11 @@ function autoMergeDependabotBlocker(pr, checks, stats, reviews, requireMacroscop
   return null;
 }
 
+function isDependabotLikePr(pr) {
+  const author = pr.author?.login ?? "";
+  return author === "dependabot[bot]" || String(pr.headRefName ?? "").startsWith("dependabot/");
+}
+
 function lowRiskMacroscopePath(path) {
   return isDocsOnlyPath(path) || isTestPath(path);
 }
@@ -676,6 +685,27 @@ function autoMergeMacroscopeLowRiskBlocker(pr, checks, stats, reviews) {
     return `too large (+${stats.additions}/-${stats.deletions})`;
   }
   return null;
+}
+
+function isLowRiskMacroscopeCandidate(pr) {
+  const files = pr.files ?? [];
+  return (
+    files.length > 0 &&
+    files.every((file) => lowRiskMacroscopePath(file.path)) &&
+    !files.some((file) => sensitivePathReason(file.path))
+  );
+}
+
+function prPriority(pr) {
+  const author = pr.author?.login ?? "";
+  let score = 0;
+  if (pr.isDraft) score += 10_000;
+  if (author === "dependabot[bot]") score -= 2_000;
+  if (pr.reviewDecision === "APPROVED") score -= 1_000;
+  if (pr.mergeable === "MERGEABLE") score -= 500;
+  if (pr.reviewDecision === "CHANGES_REQUESTED") score += 2_000;
+  const updatedAtMs = Date.parse(pr.updatedAt ?? "1970-01-01T00:00:00Z") || 0;
+  return score - updatedAtMs / 1_000_000_000;
 }
 
 function autoMergeDependabotPr({
@@ -1233,7 +1263,7 @@ function reviewItem({
     process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "1" ||
     process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "true";
   const inspection = inspectPr(repo, number);
-  if (automergeDependabot) {
+  if (automergeDependabot && isDependabotLikePr(inspection.pr)) {
     const merge = autoMergeDependabotPr({
       repo,
       number,
@@ -1255,8 +1285,13 @@ function reviewItem({
         status: `dependabot_merge_${merge.action}`,
       };
     }
+    return {
+      mode: "autonomous-dependabot-merge",
+      merge,
+      status: "dependabot_merge_blocked",
+    };
   }
-  if (automergeMacroscopeLowRisk) {
+  if (automergeMacroscopeLowRisk && isLowRiskMacroscopeCandidate(inspection.pr)) {
     const merge = autoMergeMacroscopeLowRiskPr({ repo, number, inspection });
     if (merge.action === "merged") {
       return {
@@ -1272,6 +1307,11 @@ function reviewItem({
         status: `macroscope_low_risk_merge_${merge.action}`,
       };
     }
+    return {
+      mode: "autonomous-macroscope-low-risk-merge",
+      merge,
+      status: "macroscope_low_risk_merge_blocked",
+    };
   }
   if (autorepair) {
     const repair = autoRepairPr({ repo, number, model, inspection, codexTimeoutMs });
@@ -1391,7 +1431,6 @@ function main() {
       if (processed >= maxItems) break;
       try {
         if (!autorepair && !args.refresh && currentFallbackComment(repo, number)) {
-          processed += 1;
           summary.push({ repo, number, status: "skipped_current_fallback_comment" });
           appendHistory({ repo, number, status: "skipped_current_fallback_comment" });
           continue;
@@ -1409,7 +1448,13 @@ function main() {
           requireMacroscopeApproval,
         });
         const status = result.status ?? "comment_synced";
-        const consumedBudget = !["autorepair_skipped", "dependabot_merge_skipped"].includes(status);
+        const consumedBudget = ![
+          "autorepair_skipped",
+          "dependabot_merge_skipped",
+          "dependabot_merge_blocked",
+          "macroscope_low_risk_merge_skipped",
+          "macroscope_low_risk_merge_blocked",
+        ].includes(status);
         if (consumedBudget) processed += 1;
         summary.push({ repo, number, status, ...result });
         appendHistory({ repo, number, status, ...result });
