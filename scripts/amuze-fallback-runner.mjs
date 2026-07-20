@@ -1097,6 +1097,31 @@ function autoMergeMacroscopeLowRiskBlocker(
   return null;
 }
 
+function autoMergeDependabotBlockerFromInspection(inspection, requireMacroscopeApproval) {
+  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
+  return autoMergeDependabotBlocker(
+    pr,
+    checks,
+    stats,
+    reviews,
+    conversationComments,
+    reviewThreads,
+    requireMacroscopeApproval,
+  );
+}
+
+function autoMergeMacroscopeLowRiskBlockerFromInspection(inspection) {
+  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
+  return autoMergeMacroscopeLowRiskBlocker(
+    pr,
+    checks,
+    stats,
+    reviews,
+    conversationComments,
+    reviewThreads,
+  );
+}
+
 function isLowRiskMacroscopeCandidate(pr) {
   const files = pr.files ?? [];
   return (
@@ -1125,7 +1150,7 @@ function autoMergeDependabotPr({
   adminMerge,
   requireMacroscopeApproval,
 }) {
-  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
+  const { pr, checks, reviewThreads } = inspection;
   const state = readMergeState(repo, number);
   const strategy = adminMerge ? "admin-squash-v1" : "direct-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
@@ -1138,15 +1163,7 @@ function autoMergeDependabotPr({
     reviewThreads,
   );
   if (unchanged) return unchanged;
-  const blocker = autoMergeDependabotBlocker(
-    pr,
-    checks,
-    stats,
-    reviews,
-    conversationComments,
-    reviewThreads,
-    requireMacroscopeApproval,
-  );
+  const blocker = autoMergeDependabotBlockerFromInspection(inspection, requireMacroscopeApproval);
   if (blocker) {
     const progression = mergeProgressionFlags(blocker, checks, reviewThreads);
     writeMergeState(repo, number, {
@@ -1237,7 +1254,7 @@ function autoMergeDependabotPr({
 }
 
 function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
-  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
+  const { pr, checks, reviewThreads } = inspection;
   const state = readMergeState(repo, number);
   const strategy = "macroscope-low-risk-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
@@ -1250,14 +1267,7 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
     reviewThreads,
   );
   if (unchanged) return unchanged;
-  const blocker = autoMergeMacroscopeLowRiskBlocker(
-    pr,
-    checks,
-    stats,
-    reviews,
-    conversationComments,
-    reviewThreads,
-  );
+  const blocker = autoMergeMacroscopeLowRiskBlockerFromInspection(inspection);
   if (blocker) {
     const progression = mergeProgressionFlags(blocker, checks, reviewThreads);
     writeMergeState(repo, number, {
