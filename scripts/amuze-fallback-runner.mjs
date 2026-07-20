@@ -809,6 +809,65 @@ function mergeProgressionFlags(blocker, checks = [], reviewThreads = []) {
   };
 }
 
+function unchangedMergeStateResult(state, checks = [], reviewThreads = []) {
+  if (state.status === "merged") {
+    return {
+      action: "skipped",
+      reason: "merge already merged for this head",
+      continueToComment: false,
+    };
+  }
+  return {
+    action: "skipped",
+    reason: `merge signals unchanged: ${state.reason ?? "blocked"}`,
+    continueToComment: false,
+    ...mergeProgressionFlags(state.reason, checks, reviewThreads),
+  };
+}
+
+function lookupMergedCommit(repo, number) {
+  const result = runBestEffort("gh", [
+    "pr",
+    "view",
+    String(number),
+    "--repo",
+    repo,
+    "--json",
+    "mergeCommit",
+  ]);
+  const detail = String(
+    result.error?.message || result.stderr || result.stdout || "no output",
+  ).slice(0, 1000);
+  if (result.error || result.status !== 0 || !result.stdout) {
+    return { mergeSha: null, error: detail };
+  }
+  try {
+    const mergeSha = JSON.parse(result.stdout)?.mergeCommit?.oid;
+    return mergeSha
+      ? { mergeSha, error: null }
+      : { mergeSha: null, error: `mergeCommit.oid missing; ${detail}` };
+  } catch (error) {
+    return { mergeSha: null, error: `${error.message}; ${detail}`.slice(0, 1000) };
+  }
+}
+
+function mergeReceiptRecord({ repo, headSha, mergeSha, lookupError, repaired = false }) {
+  const prefix = repaired ? "Repaired and merged" : "Merged";
+  const proof = repaired
+    ? "CI green, frontier review passed, zero actionable threads"
+    : "green checks and clean exact-head review";
+  if (mergeSha) {
+    return {
+      status: "applied",
+      message: `${prefix} exact head ${headSha} as ${mergeSha}; ${proof}. Reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
+    };
+  }
+  return {
+    status: "unexpected",
+    message: `${prefix} exact head ${headSha}, but the merge commit lookup failed; no reversal SHA is being claimed. Lookup detail: ${String(lookupError ?? "unknown lookup failure").slice(0, 1000)}`,
+  };
+}
+
 function nextMergeAttempt(state, headSha, strategy) {
   const configuredMax = Number(process.env.CLAWSWEEPER_AUTOMERGE_MAX_ATTEMPTS_PER_HEAD ?? 3);
   const maxAttempts = Number.isFinite(configuredMax) ? Math.max(1, configuredMax) : 3;
@@ -825,7 +884,7 @@ function nextMergeAttempt(state, headSha, strategy) {
   };
 }
 
-function pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan) {
+function recordExhaustedMergePause(repo, number, pr, strategy, attemptPlan) {
   const reason = `merge attempt cap reached (${attemptPlan.maxAttempts}) for exact head ${pr.headRefOid}`;
   writeMergeState(repo, number, {
     headSha: pr.headRefOid,
@@ -1046,17 +1105,7 @@ function autoMergeDependabotPr({
   const sameMergeLane = state.headSha === pr.headRefOid && state.strategy === strategy;
   const sameBlockedSignals = state.status === "blocked" && state.fingerprint === fingerprint;
   if (sameMergeLane && (state.status === "merged" || sameBlockedSignals)) {
-    return {
-      action: "skipped",
-      reason:
-        state.status === "blocked"
-          ? `merge signals unchanged: ${state.reason ?? "blocked"}`
-          : `merge already ${state.status} for this head`,
-      continueToComment: false,
-      needsAgentReview:
-        state.status === "blocked" &&
-        /Macroscope|agent approval|review decision/i.test(state.reason),
-    };
+    return unchangedMergeStateResult(state, checks, reviewThreads);
   }
   const blocker = autoMergeDependabotBlocker(
     pr,
@@ -1086,7 +1135,7 @@ function autoMergeDependabotPr({
 
   const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
   if (!attemptPlan.allowed) {
-    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+    return recordExhaustedMergePause(repo, number, pr, strategy, attemptPlan);
   }
 
   writeMergeState(repo, number, {
@@ -1132,26 +1181,25 @@ function autoMergeDependabotPr({
       continueToComment: false,
     };
   }
+  const lookup = lookupMergedCommit(repo, number);
+  const receipt = mergeReceiptRecord({
+    repo,
+    headSha: pr.headRefOid,
+    mergeSha: lookup.mergeSha,
+    lookupError: lookup.error,
+  });
   writeMergeState(repo, number, {
     headSha: pr.headRefOid,
     status: "merged",
     strategy,
+    mergeSha: lookup.mergeSha,
+    mergeLookupError: lookup.error,
     output: String(result.stdout || result.stderr || "").slice(0, 1000),
   });
-  const mergedView = runJsonBestEffort(
-    "gh",
-    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
-    null,
-  );
-  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
-  emitReceipt(
-    `clawsweeper:${repo}#${number}`,
-    "applied",
-    `Merged exact head ${pr.headRefOid} as ${mergeSha} after green checks and clean exact-head review; reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
-  );
+  emitReceipt(`clawsweeper:${repo}#${number}`, receipt.status, receipt.message);
   return {
     action: "merged",
-    mergeSha,
+    mergeSha: lookup.mergeSha,
     output: result.stdout || result.stderr || "",
     continueToComment: false,
   };
@@ -1162,22 +1210,10 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
   const state = readMergeState(repo, number);
   const strategy = "macroscope-low-risk-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
-  if (
-    state.headSha === pr.headRefOid &&
-    state.strategy === strategy &&
-    (state.status === "merged" || (state.status === "blocked" && state.fingerprint === fingerprint))
-  ) {
-    return {
-      action: "skipped",
-      reason:
-        state.status === "blocked"
-          ? `merge signals unchanged: ${state.reason ?? "blocked"}`
-          : `merge already ${state.status} for this head`,
-      continueToComment: false,
-      needsAgentReview:
-        state.status === "blocked" &&
-        /Macroscope|agent approval|review decision/i.test(state.reason),
-    };
+  const sameMergeLane = state.headSha === pr.headRefOid && state.strategy === strategy;
+  const sameBlockedSignals = state.status === "blocked" && state.fingerprint === fingerprint;
+  if (sameMergeLane && (state.status === "merged" || sameBlockedSignals)) {
+    return unchangedMergeStateResult(state, checks, reviewThreads);
   }
   const blocker = autoMergeMacroscopeLowRiskBlocker(
     pr,
@@ -1206,7 +1242,7 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
 
   const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
   if (!attemptPlan.allowed) {
-    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+    return recordExhaustedMergePause(repo, number, pr, strategy, attemptPlan);
   }
 
   writeMergeState(repo, number, {
@@ -1250,26 +1286,25 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
       continueToComment: false,
     };
   }
+  const lookup = lookupMergedCommit(repo, number);
+  const receipt = mergeReceiptRecord({
+    repo,
+    headSha: pr.headRefOid,
+    mergeSha: lookup.mergeSha,
+    lookupError: lookup.error,
+  });
   writeMergeState(repo, number, {
     headSha: pr.headRefOid,
     status: "merged",
     strategy,
+    mergeSha: lookup.mergeSha,
+    mergeLookupError: lookup.error,
     output: String(result.stdout || result.stderr || "").slice(0, 1000),
   });
-  const mergedView = runJsonBestEffort(
-    "gh",
-    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
-    null,
-  );
-  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
-  emitReceipt(
-    `clawsweeper:${repo}#${number}`,
-    "applied",
-    `Merged exact head ${pr.headRefOid} as ${mergeSha} after green checks and clean exact-head review; reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
-  );
+  emitReceipt(`clawsweeper:${repo}#${number}`, receipt.status, receipt.message);
   return {
     action: "merged",
-    mergeSha,
+    mergeSha: lookup.mergeSha,
     output: result.stdout || result.stderr || "",
     continueToComment: false,
   };
@@ -1392,7 +1427,7 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
 
   const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
   if (!attemptPlan.allowed) {
-    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+    return recordExhaustedMergePause(repo, number, pr, strategy, attemptPlan);
   }
 
   const resolvedThreads = resolveOutdatedReviewThreads(repo, reviewThreads);
@@ -1434,25 +1469,29 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
     });
     return { action: "blocked", reason: String(reason).slice(0, 300) };
   }
-  const mergedView = runJsonBestEffort(
-    "gh",
-    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
-    null,
-  );
-  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
+  const lookup = lookupMergedCommit(repo, number);
+  const receipt = mergeReceiptRecord({
+    repo,
+    headSha: pr.headRefOid,
+    mergeSha: lookup.mergeSha,
+    lookupError: lookup.error,
+    repaired: true,
+  });
   writeMergeState(repo, number, {
     headSha: pr.headRefOid,
     status: "merged",
     strategy,
-    mergeSha,
+    mergeSha: lookup.mergeSha,
+    mergeLookupError: lookup.error,
     resolvedThreads,
   });
-  emitReceipt(
-    `clawsweeper:${repo}#${number}`,
-    "applied",
-    `Repaired and merged exact head ${pr.headRefOid} as ${mergeSha}; CI green, frontier review passed, zero actionable threads. Reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
-  );
-  return { action: "merged", mergeSha, resolvedThreads, output: result.stdout || result.stderr };
+  emitReceipt(`clawsweeper:${repo}#${number}`, receipt.status, receipt.message);
+  return {
+    action: "merged",
+    mergeSha: lookup.mergeSha,
+    resolvedThreads,
+    output: result.stdout || result.stderr,
+  };
 }
 
 function formatFindings(findings) {
@@ -2159,10 +2198,12 @@ export {
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
   mergeProgressionFlags,
+  mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
+  unchangedMergeStateResult,
   unresolvedOutdatedReviewThreads,
 };
 

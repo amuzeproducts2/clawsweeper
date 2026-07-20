@@ -10,10 +10,12 @@ import {
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
   mergeProgressionFlags,
+  mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
+  unchangedMergeStateResult,
   unresolvedOutdatedReviewThreads,
 } from "../scripts/amuze-fallback-runner.mjs";
 
@@ -233,6 +235,38 @@ test("failed checks and active threads progress to repair instead of stalling at
     ]),
     { needsRepair: true, needsAgentReview: false },
   );
+  assert.deepEqual(
+    unchangedMergeStateResult({ status: "blocked", reason: "checks are not all green" }, [
+      { name: "CI", state: "FAILURE", bucket: "fail" },
+    ]),
+    {
+      action: "skipped",
+      reason: "merge signals unchanged: checks are not all green",
+      continueToComment: false,
+      needsRepair: true,
+      needsAgentReview: false,
+    },
+  );
+});
+
+test("merge receipts never claim an unknown reversal SHA", () => {
+  assert.deepEqual(
+    mergeReceiptRecord({ repo: "amuzeproducts2/example", headSha, mergeSha: "merge123" }),
+    {
+      status: "applied",
+      message:
+        "Merged exact head abc123def456 as merge123; green checks and clean exact-head review. Reverse: git revert merge123 in amuzeproducts2/example and publish the revert through a PR.",
+    },
+  );
+  const missing = mergeReceiptRecord({
+    repo: "amuzeproducts2/example",
+    headSha,
+    mergeSha: null,
+    lookupError: "gh auth failed",
+  });
+  assert.equal(missing.status, "unexpected");
+  assert.match(missing.message, /gh auth failed/);
+  assert.doesNotMatch(missing.message, /git revert unknown/);
 });
 
 test("pending loop state is re-enqueued after the review planner considers it current", () => {
