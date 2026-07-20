@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   readdirSync,
   copyFileSync,
   readFileSync,
+  renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -167,8 +170,36 @@ function ensureDir(path) {
   mkdirSync(path, { recursive: true });
 }
 
+function emitReceipt(component, status, message) {
+  const receiptPath =
+    process.env.CLAWSWEEPER_RECEIPT_FILE ||
+    (existsSync("/var/lib/incidentd/spool") ? "/var/lib/incidentd/spool/receipts.jsonl" : "");
+  if (!receiptPath) return false;
+  try {
+    ensureDir(dirname(receiptPath));
+    writeFileSync(
+      receiptPath,
+      `${JSON.stringify({
+        ts: new Date().toISOString(),
+        source: "clawsweeper",
+        component,
+        status,
+        message: String(message).slice(0, 2000),
+        pid: process.pid,
+      })}\n`,
+      { flag: "a" },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function appendHistory(entry) {
   ensureDir(dirname(statePath));
+  if (existsSync(statePath) && statSync(statePath).size > 10 * 1024 * 1024) {
+    renameSync(statePath, `${statePath}.1`);
+  }
   writeFileSync(statePath, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, {
     flag: "a",
   });
@@ -211,9 +242,9 @@ function planDueItems(repo, itemsDir, maxPages, capacity) {
   return plan.shards?.flatMap((shard) => shard.itemNumbers ?? []) ?? [];
 }
 
-function listOpenPullRequestNumbers(repo, maxPages) {
+function listOpenPullRequests(repo, maxPages) {
   const limit = Math.max(1, Math.min(100, maxPages * 100));
-  const prs = runJson("gh", [
+  return runJson("gh", [
     "pr",
     "list",
     "--repo",
@@ -223,9 +254,31 @@ function listOpenPullRequestNumbers(repo, maxPages) {
     "--limit",
     String(limit),
     "--json",
-    "number,updatedAt,author,isDraft,mergeable,reviewDecision",
+    "number,updatedAt,author,isDraft,mergeable,reviewDecision,headRefOid",
   ]);
+}
+
+function listOpenPullRequestNumbers(repo, maxPages) {
+  const prs = listOpenPullRequests(repo, maxPages);
   return prs.sort((left, right) => prPriority(left) - prPriority(right)).map((pr) => pr.number);
+}
+
+function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
+  if (repairState.status === "pushed" && repairState.pushedSha === pr.headRefOid) return true;
+  if (mergeState.headSha !== pr.headRefOid) return false;
+  if (!["blocked", "failed", "started"].includes(mergeState.status)) return false;
+  return /checks|Macroscope|agent approval|review decision|review thread|merge failed/i.test(
+    mergeState.reason ?? "merge started",
+  );
+}
+
+function listActiveLoopItemNumbers(repo, maxPages) {
+  return listOpenPullRequests(repo, maxPages)
+    .filter((pr) =>
+      loopStateRequiresTurn(pr, readRepairState(repo, pr.number), readMergeState(repo, pr.number)),
+    )
+    .sort((left, right) => prPriority(left) - prPriority(right))
+    .map((pr) => pr.number);
 }
 
 function repoDefaultBranch(repo) {
@@ -269,6 +322,43 @@ function copyReviewArtifacts(reviewDir, itemsDir, repo) {
 
 function issueComments(repo, number) {
   return runJson("gh", ["api", `repos/${repo}/issues/${number}/comments?per_page=100`]);
+}
+
+function pullRequestReviewThreads(repo, number) {
+  const [owner, name] = repo.split("/");
+  const result = runJsonBestEffort(
+    "gh",
+    [
+      "api",
+      "graphql",
+      "-F",
+      `owner=${owner}`,
+      "-F",
+      `name=${name}`,
+      "-F",
+      `number=${number}`,
+      "-f",
+      "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:100){nodes{author{login} body url createdAt}}}}}}}",
+    ],
+    null,
+  );
+  return result?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+}
+
+function actionableReviewThreads(reviewThreads = []) {
+  return reviewThreads.filter((thread) => !thread?.isResolved && !thread?.isOutdated);
+}
+
+function unresolvedOutdatedReviewThreads(reviewThreads = []) {
+  return reviewThreads.filter((thread) => !thread?.isResolved && thread?.isOutdated);
+}
+
+function reviewThreadEvidence(thread) {
+  const comment = thread?.comments?.nodes?.at(-1);
+  const location = `${thread?.path ?? "review"}${thread?.line ? `:${thread.line}` : ""}`;
+  return `${location} by ${comment?.author?.login ?? "unknown"}: ${String(comment?.body ?? "")
+    .replaceAll(/\s+/g, " ")
+    .slice(0, 500)}`;
 }
 
 function commentPayloadPath(repo, number, body) {
@@ -414,7 +504,7 @@ function finding(severity, title, body, evidence = []) {
   return { severity, title, body, evidence };
 }
 
-function deterministicFindings(pr, checks) {
+function deterministicFindings(pr, checks, reviewThreads = []) {
   const files = pr.files ?? [];
   const stats = prChangeStats(files);
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
@@ -428,6 +518,18 @@ function deterministicFindings(pr, checks) {
   const sensitiveFiles = files
     .map((file) => ({ path: file.path, reason: sensitivePathReason(file.path) }))
     .filter((file) => file.reason);
+  const actionableThreads = actionableReviewThreads(reviewThreads);
+
+  if (actionableThreads.length) {
+    findings.push(
+      finding(
+        "blocker",
+        "Unresolved review threads",
+        "Current, non-outdated inline review findings must be repaired or explicitly resolved before merge.",
+        actionableThreads.slice(0, 12).map(reviewThreadEvidence),
+      ),
+    );
+  }
 
   if (failedChecks.length) {
     findings.push(
@@ -533,7 +635,21 @@ function inspectPr(repo, number) {
     ["api", `repos/${repo}/pulls/${number}/reviews?per_page=100`],
     [],
   );
-  return { pr, checks, reviewComments, reviews, ...deterministicFindings(pr, checks) };
+  const conversationComments = runJsonBestEffort(
+    "gh",
+    ["api", `repos/${repo}/issues/${number}/comments?per_page=100`],
+    [],
+  );
+  const reviewThreads = pullRequestReviewThreads(repo, number);
+  return {
+    pr,
+    checks,
+    reviewComments,
+    reviews,
+    conversationComments,
+    reviewThreads,
+    ...deterministicFindings(pr, checks, reviewThreads),
+  };
 }
 
 function dependencyBumpPath(path) {
@@ -564,6 +680,113 @@ function macroscopeApprovabilityChecks(checks) {
   );
 }
 
+function agentApprovalFallbackEnabled() {
+  return process.env.CLAWSWEEPER_ALLOW_AGENT_APPROVAL_FALLBACK !== "0";
+}
+
+function configuredAgentReviewAuthors() {
+  return new Set(
+    [
+      process.env.CLAWSWEEPER_COMMENT_AUTHOR_LOGIN,
+      "jaywillingham",
+      "clawsweeper",
+      "clawsweeper[bot]",
+      "openclaw-clawsweeper[bot]",
+      "github-actions[bot]",
+    ]
+      .filter(Boolean)
+      .map((login) => String(login).toLowerCase()),
+  );
+}
+
+function latestExactHeadAgentVerdict(pr, comments = []) {
+  const trustedAuthors = configuredAgentReviewAuthors();
+  let verdict = null;
+  for (const comment of comments) {
+    const login = String(comment?.user?.login ?? comment?.author?.login ?? "").toLowerCase();
+    const body = String(comment?.body ?? "");
+    if (!trustedAuthors.has(login) || !body.includes("<!-- clawsweeper-review item=")) continue;
+    for (const marker of body.matchAll(
+      /<!--\s*clawsweeper-verdict:(pass|needs-changes|needs-repair|needs-human|human-review)\b[^>]*\bsha=([a-f0-9]+)\b[^>]*-->/gi,
+    )) {
+      if (marker[2] !== pr.headRefOid) continue;
+      verdict = {
+        verdict: marker[1].toLowerCase(),
+        author: login,
+        commentId: comment?.id ?? null,
+        url: comment?.html_url ?? comment?.url ?? null,
+      };
+    }
+  }
+  return verdict;
+}
+
+function hasExactHeadAgentPass(pr, comments = []) {
+  return latestExactHeadAgentVerdict(pr, comments)?.verdict === "pass";
+}
+
+function mergeSignalFingerprint({ pr, checks, reviews, conversationComments, reviewThreads }) {
+  const payload = {
+    headSha: pr.headRefOid,
+    reviewDecision: pr.reviewDecision ?? null,
+    mergeable: pr.mergeable ?? null,
+    checks: (checks ?? [])
+      .map((check) => [check.name, check.state, check.bucket])
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    reviews: (reviews ?? [])
+      .map((review) => [review.user?.login, review.state, review.commit_id])
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    agentVerdict: latestExactHeadAgentVerdict(pr, conversationComments),
+    reviewThreads: (reviewThreads ?? [])
+      .map((thread) => [thread.id, thread.isResolved, thread.isOutdated])
+      .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function mergeProgressionFlags(blocker, checks = [], reviewThreads = []) {
+  const needsRepair =
+    actionableReviewThreads(reviewThreads).length > 0 ||
+    checks.some((check) => check.bucket === "fail" || check.bucket === "cancel");
+  return {
+    needsRepair,
+    needsAgentReview:
+      !needsRepair && /Macroscope|agent approval|review decision/i.test(String(blocker)),
+  };
+}
+
+function nextMergeAttempt(state, headSha, strategy) {
+  const configuredMax = Number(process.env.CLAWSWEEPER_AUTOMERGE_MAX_ATTEMPTS_PER_HEAD ?? 3);
+  const maxAttempts = Number.isFinite(configuredMax) ? Math.max(1, configuredMax) : 3;
+  const sameLane = state.headSha === headSha && state.strategy === strategy;
+  const previousAttempts = sameLane ? Number(state.attempts ?? 0) : 0;
+  return {
+    allowed: !(
+      sameLane &&
+      ["failed", "started"].includes(state.status) &&
+      previousAttempts >= maxAttempts
+    ),
+    attempt: previousAttempts + 1,
+    maxAttempts,
+  };
+}
+
+function pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan) {
+  const reason = `merge attempt cap reached (${attemptPlan.maxAttempts}) for exact head ${pr.headRefOid}`;
+  writeMergeState(repo, number, {
+    headSha: pr.headRefOid,
+    status: "paused",
+    strategy,
+    reason,
+  });
+  emitReceipt(
+    `clawsweeper:${repo}#${number}`,
+    "unexpected",
+    `${reason}; no further merge attempts will run until the head or lane changes.`,
+  );
+  return { action: "paused", reason, continueToComment: false };
+}
+
 function latestExactHeadMacroscopeReview(pr, reviews) {
   return [...(reviews ?? [])]
     .reverse()
@@ -575,7 +798,19 @@ function latestExactHeadMacroscopeReview(pr, reviews) {
     );
 }
 
-function macroscopeApprovalBlocker(pr, checks, reviews) {
+function macroscopeApprovalBlocker(
+  pr,
+  checks,
+  reviews,
+  conversationComments = [],
+  reviewThreads = [],
+) {
+  const actionableThreads = actionableReviewThreads(reviewThreads);
+  if (actionableThreads.length) {
+    return `${actionableThreads.length} unresolved actionable review thread${
+      actionableThreads.length === 1 ? "" : "s"
+    }`;
+  }
   const approvabilityChecks = macroscopeApprovabilityChecks(checks);
   const failedCheck = approvabilityChecks.find(
     (check) => check.bucket === "fail" || check.bucket === "cancel",
@@ -590,16 +825,31 @@ function macroscopeApprovalBlocker(pr, checks, reviews) {
     return `Macroscope approvability check is still pending (${pendingCheck.name}: ${pendingCheck.state})`;
 
   const latestReview = latestExactHeadMacroscopeReview(pr, reviews);
-  if (!latestReview) return "missing exact-head Macroscope approval";
+  if (latestReview?.state === "APPROVED" && pr.reviewDecision === "APPROVED") return null;
+
+  if (
+    agentApprovalFallbackEnabled() &&
+    hasExactHeadAgentPass(pr, conversationComments) &&
+    actionableThreads.length === 0
+  ) {
+    return null;
+  }
+
+  if (!latestReview) return "missing exact-head Macroscope or agent approval";
   if (latestReview.state !== "APPROVED")
     return `latest exact-head Macroscope review is ${latestReview.state}`;
-  if (pr.reviewDecision !== "APPROVED") {
-    return `GitHub review decision is ${pr.reviewDecision ?? "unset"}, not APPROVED after Macroscope review`;
-  }
-  return null;
+  return `GitHub review decision is ${pr.reviewDecision ?? "unset"}, not APPROVED after Macroscope review`;
 }
 
-function autoMergeDependabotBlocker(pr, checks, stats, reviews, requireMacroscopeApproval) {
+function autoMergeDependabotBlocker(
+  pr,
+  checks,
+  stats,
+  reviews,
+  conversationComments,
+  reviewThreads,
+  requireMacroscopeApproval,
+) {
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   const files = pr.files ?? [];
   const author = pr.author?.login ?? "";
@@ -620,7 +870,13 @@ function autoMergeDependabotBlocker(pr, checks, stats, reviews, requireMacroscop
   }
   if (!allRequiredSignalsGreen(checks)) return "checks are not all green";
   if (requireMacroscopeApproval) {
-    const macroscopeBlocker = macroscopeApprovalBlocker(pr, checks, reviews);
+    const macroscopeBlocker = macroscopeApprovalBlocker(
+      pr,
+      checks,
+      reviews,
+      conversationComments,
+      reviewThreads,
+    );
     if (macroscopeBlocker) return macroscopeBlocker;
   }
   if (!files.length || files.some((file) => !dependencyBumpPath(file.path))) {
@@ -647,7 +903,14 @@ function lowRiskMacroscopePath(path) {
   return isDocsOnlyPath(path) || isTestPath(path);
 }
 
-function autoMergeMacroscopeLowRiskBlocker(pr, checks, stats, reviews) {
+function autoMergeMacroscopeLowRiskBlocker(
+  pr,
+  checks,
+  stats,
+  reviews,
+  conversationComments,
+  reviewThreads,
+) {
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   const files = pr.files ?? [];
   if (pr.isDraft) return "draft PR";
@@ -666,7 +929,13 @@ function autoMergeMacroscopeLowRiskBlocker(pr, checks, stats, reviews) {
   }
   if (!allRequiredSignalsGreen(checks)) return "checks are not all green";
 
-  const macroscopeBlocker = macroscopeApprovalBlocker(pr, checks, reviews);
+  const macroscopeBlocker = macroscopeApprovalBlocker(
+    pr,
+    checks,
+    reviews,
+    conversationComments,
+    reviewThreads,
+  );
   if (macroscopeBlocker) return macroscopeBlocker;
 
   if (!files.length || files.some((file) => !lowRiskMacroscopePath(file.path))) {
@@ -715,20 +984,66 @@ function autoMergeDependabotPr({
   adminMerge,
   requireMacroscopeApproval,
 }) {
-  const { pr, checks, stats, reviews } = inspection;
+  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
   const state = readMergeState(repo, number);
   const strategy = adminMerge ? "admin-squash-v1" : "direct-squash-v1";
-  if (state.headSha === pr.headRefOid && state.strategy === strategy && state.status) {
+  const fingerprint = mergeSignalFingerprint(inspection);
+  if (
+    state.headSha === pr.headRefOid &&
+    state.strategy === strategy &&
+    (state.status === "merged" || (state.status === "blocked" && state.fingerprint === fingerprint))
+  ) {
     return {
       action: "skipped",
-      reason: `merge already ${state.status} for this head`,
+      reason:
+        state.status === "blocked"
+          ? `merge signals unchanged: ${state.reason ?? "blocked"}`
+          : `merge already ${state.status} for this head`,
       continueToComment: false,
+      needsAgentReview:
+        state.status === "blocked" &&
+        /Macroscope|agent approval|review decision/i.test(state.reason),
     };
   }
-  const blocker = autoMergeDependabotBlocker(pr, checks, stats, reviews, requireMacroscopeApproval);
-  if (blocker) return { action: "blocked", reason: blocker, continueToComment: true };
+  const blocker = autoMergeDependabotBlocker(
+    pr,
+    checks,
+    stats,
+    reviews,
+    conversationComments,
+    reviewThreads,
+    requireMacroscopeApproval,
+  );
+  if (blocker) {
+    const progression = mergeProgressionFlags(blocker, checks, reviewThreads);
+    writeMergeState(repo, number, {
+      headSha: pr.headRefOid,
+      status: "blocked",
+      strategy,
+      fingerprint,
+      reason: blocker,
+    });
+    return {
+      action: "blocked",
+      reason: blocker,
+      continueToComment: true,
+      ...progression,
+    };
+  }
 
-  writeMergeState(repo, number, { headSha: pr.headRefOid, status: "started", strategy });
+  const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
+  if (!attemptPlan.allowed) {
+    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+  }
+
+  writeMergeState(repo, number, {
+    headSha: pr.headRefOid,
+    status: "started",
+    strategy,
+    fingerprint,
+    attempts: attemptPlan.attempt,
+    reason: null,
+  });
   const mergeArgs = [
     "pr",
     "merge",
@@ -742,7 +1057,7 @@ function autoMergeDependabotPr({
     "--subject",
     pr.title ?? `Merge ${repo}#${number}`,
     "--body",
-    `Merged by ClawSweeper autonomous Dependabot gate after green checks and Macroscope approval for exact head ${pr.headRefOid}.`,
+    `Merged by ClawSweeper after green checks, zero actionable review threads, and exact-head Macroscope or frontier-agent approval for ${pr.headRefOid}.`,
   ];
   if (adminMerge) mergeArgs.push("--admin");
   const result = runBestEffort("gh", mergeArgs);
@@ -770,28 +1085,85 @@ function autoMergeDependabotPr({
     strategy,
     output: String(result.stdout || result.stderr || "").slice(0, 1000),
   });
+  const mergedView = runJsonBestEffort(
+    "gh",
+    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
+    null,
+  );
+  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
+  emitReceipt(
+    `clawsweeper:${repo}#${number}`,
+    "applied",
+    `Merged exact head ${pr.headRefOid} as ${mergeSha} after green checks and clean exact-head review; reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
+  );
   return {
     action: "merged",
+    mergeSha,
     output: result.stdout || result.stderr || "",
     continueToComment: false,
   };
 }
 
 function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
-  const { pr, checks, stats, reviews } = inspection;
+  const { pr, checks, stats, reviews, conversationComments, reviewThreads } = inspection;
   const state = readMergeState(repo, number);
   const strategy = "macroscope-low-risk-squash-v1";
-  if (state.headSha === pr.headRefOid && state.strategy === strategy && state.status) {
+  const fingerprint = mergeSignalFingerprint(inspection);
+  if (
+    state.headSha === pr.headRefOid &&
+    state.strategy === strategy &&
+    (state.status === "merged" || (state.status === "blocked" && state.fingerprint === fingerprint))
+  ) {
     return {
       action: "skipped",
-      reason: `merge already ${state.status} for this head`,
+      reason:
+        state.status === "blocked"
+          ? `merge signals unchanged: ${state.reason ?? "blocked"}`
+          : `merge already ${state.status} for this head`,
       continueToComment: false,
+      needsAgentReview:
+        state.status === "blocked" &&
+        /Macroscope|agent approval|review decision/i.test(state.reason),
     };
   }
-  const blocker = autoMergeMacroscopeLowRiskBlocker(pr, checks, stats, reviews);
-  if (blocker) return { action: "blocked", reason: blocker, continueToComment: true };
+  const blocker = autoMergeMacroscopeLowRiskBlocker(
+    pr,
+    checks,
+    stats,
+    reviews,
+    conversationComments,
+    reviewThreads,
+  );
+  if (blocker) {
+    const progression = mergeProgressionFlags(blocker, checks, reviewThreads);
+    writeMergeState(repo, number, {
+      headSha: pr.headRefOid,
+      status: "blocked",
+      strategy,
+      fingerprint,
+      reason: blocker,
+    });
+    return {
+      action: "blocked",
+      reason: blocker,
+      continueToComment: true,
+      ...progression,
+    };
+  }
 
-  writeMergeState(repo, number, { headSha: pr.headRefOid, status: "started", strategy });
+  const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
+  if (!attemptPlan.allowed) {
+    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+  }
+
+  writeMergeState(repo, number, {
+    headSha: pr.headRefOid,
+    status: "started",
+    strategy,
+    fingerprint,
+    attempts: attemptPlan.attempt,
+    reason: null,
+  });
   const result = runBestEffort("gh", [
     "pr",
     "merge",
@@ -805,7 +1177,7 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
     "--subject",
     pr.title ?? `Merge ${repo}#${number}`,
     "--body",
-    `Merged by ClawSweeper autonomous Macroscope low-risk gate after green checks and exact-head Macroscope approval for ${pr.headRefOid}.`,
+    `Merged by ClawSweeper after green checks, zero actionable review threads, and exact-head Macroscope or frontier-agent approval for ${pr.headRefOid}.`,
   ]);
   if (result.error || result.status !== 0) {
     const reason =
@@ -831,11 +1203,187 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
     strategy,
     output: String(result.stdout || result.stderr || "").slice(0, 1000),
   });
+  const mergedView = runJsonBestEffort(
+    "gh",
+    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
+    null,
+  );
+  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
+  emitReceipt(
+    `clawsweeper:${repo}#${number}`,
+    "applied",
+    `Merged exact head ${pr.headRefOid} as ${mergeSha} after green checks and clean exact-head review; reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
+  );
   return {
     action: "merged",
+    mergeSha,
     output: result.stdout || result.stderr || "",
     continueToComment: false,
   };
+}
+
+function currentRepairForHead(repo, number, headSha) {
+  const state = readRepairState(repo, number);
+  return state.status === "pushed" && state.pushedSha === headSha ? state : null;
+}
+
+function agentRepairReadiness(
+  repo,
+  number,
+  inspection,
+  repairState = readRepairState(repo, number),
+) {
+  const { pr, checks, stats, conversationComments, reviewThreads } = inspection;
+  if (repairState.status !== "pushed" || repairState.pushedSha !== pr.headRefOid) {
+    return { status: "ineligible", reason: "current head is not a ClawSweeper repair" };
+  }
+  if (pr.isDraft) return { status: "human", reason: "draft PR" };
+  if (pr.isCrossRepository) return { status: "human", reason: "cross-repository PR" };
+  if (pr.mergeable !== "MERGEABLE") {
+    return { status: "waiting", reason: `mergeable state is ${pr.mergeable}` };
+  }
+  const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
+  if (
+    labels.some((label) =>
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+        label,
+      ),
+    )
+  ) {
+    return { status: "human", reason: "risk/pause label present" };
+  }
+  const sensitive = (pr.files ?? []).find((file) => sensitivePathReason(file.path));
+  if (sensitive) return { status: "human", reason: `sensitive path changed: ${sensitive.path}` };
+  if (stats.files > Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_FILES ?? 20)) {
+    return { status: "human", reason: `too many changed files (${stats.files})` };
+  }
+  const activeThreads = actionableReviewThreads(reviewThreads);
+  if (activeThreads.length) {
+    return {
+      status: "repair",
+      reason: `${activeThreads.length} unresolved actionable review thread${
+        activeThreads.length === 1 ? "" : "s"
+      }`,
+    };
+  }
+  const failedChecks = checks.filter(
+    (check) => check.bucket === "fail" || check.bucket === "cancel",
+  );
+  if (failedChecks.length) return { status: "repair", reason: "checks failed after repair" };
+  if (!allRequiredSignalsGreen(checks)) {
+    return { status: "waiting", reason: "waiting for exact-head checks" };
+  }
+  const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
+  if (!verdict) return { status: "review", reason: "waiting for exact-head agent review" };
+  if (verdict.verdict === "pass") return { status: "ready", reason: "repair is verified" };
+  if (["needs-changes", "needs-repair"].includes(verdict.verdict)) {
+    return { status: "repair", reason: `agent verdict is ${verdict.verdict}` };
+  }
+  return { status: "human", reason: `agent verdict is ${verdict.verdict}` };
+}
+
+function resolveOutdatedReviewThreads(repo, reviewThreads = []) {
+  const resolved = [];
+  for (const thread of unresolvedOutdatedReviewThreads(reviewThreads)) {
+    const result = runJsonBestEffort(
+      "gh",
+      [
+        "api",
+        "graphql",
+        "-F",
+        `threadId=${thread.id}`,
+        "-f",
+        "query=mutation($threadId:ID!){resolvePullRequestReviewThread(input:{threadId:$threadId}){thread{isResolved}}}",
+      ],
+      null,
+    );
+    if (result?.data?.resolvePullRequestReviewThread?.thread?.isResolved) resolved.push(thread.id);
+  }
+  return resolved;
+}
+
+function autoMergeAgentRepairPr({ repo, number, inspection, adminMerge }) {
+  const { pr, reviewThreads } = inspection;
+  const readiness = agentRepairReadiness(repo, number, inspection);
+  if (readiness.status !== "ready") {
+    return {
+      action: readiness.status,
+      reason: readiness.reason,
+      continueToRepair: readiness.status === "repair",
+      continueToReview: readiness.status === "review",
+    };
+  }
+
+  const state = readMergeState(repo, number);
+  const strategy = adminMerge ? "agent-repair-admin-squash-v1" : "agent-repair-squash-v1";
+  if (state.headSha === pr.headRefOid && state.strategy === strategy && state.status === "merged") {
+    return { action: "skipped", reason: "repair already merged", continueToReview: false };
+  }
+
+  const attemptPlan = nextMergeAttempt(state, pr.headRefOid, strategy);
+  if (!attemptPlan.allowed) {
+    return pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan);
+  }
+
+  const resolvedThreads = resolveOutdatedReviewThreads(repo, reviewThreads);
+  writeMergeState(repo, number, {
+    headSha: pr.headRefOid,
+    status: "started",
+    strategy,
+    resolvedThreads,
+    attempts: attemptPlan.attempt,
+    reason: null,
+  });
+  const mergeArgs = [
+    "pr",
+    "merge",
+    String(number),
+    "--repo",
+    repo,
+    "--squash",
+    "--delete-branch",
+    "--match-head-commit",
+    pr.headRefOid,
+    "--subject",
+    pr.title ?? `Merge repaired ${repo}#${number}`,
+    "--body",
+    `Merged by ClawSweeper after repair, green exact-head checks, independent frontier review, and zero actionable review threads for ${pr.headRefOid}.`,
+  ];
+  if (adminMerge) mergeArgs.push("--admin");
+  const result = runBestEffort("gh", mergeArgs);
+  if (result.error || result.status !== 0) {
+    const reason =
+      result.error?.message ||
+      result.stderr ||
+      result.stdout ||
+      `gh pr merge exited ${result.status}`;
+    writeMergeState(repo, number, {
+      headSha: pr.headRefOid,
+      status: "failed",
+      strategy,
+      reason: String(reason).slice(0, 1000),
+    });
+    return { action: "blocked", reason: String(reason).slice(0, 300) };
+  }
+  const mergedView = runJsonBestEffort(
+    "gh",
+    ["pr", "view", String(number), "--repo", repo, "--json", "mergeCommit"],
+    null,
+  );
+  const mergeSha = mergedView?.mergeCommit?.oid ?? "unknown";
+  writeMergeState(repo, number, {
+    headSha: pr.headRefOid,
+    status: "merged",
+    strategy,
+    mergeSha,
+    resolvedThreads,
+  });
+  emitReceipt(
+    `clawsweeper:${repo}#${number}`,
+    "applied",
+    `Repaired and merged exact head ${pr.headRefOid} as ${mergeSha}; CI green, frontier review passed, zero actionable threads. Reverse: git revert ${mergeSha} in ${repo} and publish the revert through a PR.`,
+  );
+  return { action: "merged", mergeSha, resolvedThreads, output: result.stdout || result.stderr };
 }
 
 function formatFindings(findings) {
@@ -942,7 +1490,7 @@ function deterministicFallbackComment(repo, number, errorMessage = "", inspectio
   return { action: "posted", commentId: created.id, url: created.html_url };
 }
 
-function autoRepairBlocker(repo, pr, checks, findings, stats) {
+function autoRepairBlocker(repo, pr, checks, findings, stats, reviewThreads = []) {
   const [owner] = repo.split("/");
   const headOwner =
     pr.headRepositoryOwner?.login ??
@@ -960,6 +1508,7 @@ function autoRepairBlocker(repo, pr, checks, findings, stats) {
   const actionable =
     failedChecks.length > 0 ||
     pr.reviewDecision === "CHANGES_REQUESTED" ||
+    actionableReviewThreads(reviewThreads).length > 0 ||
     findings.some((finding) => /test changes/i.test(finding.title));
 
   if (!actionable) return "no actionable repair signal";
@@ -994,7 +1543,7 @@ function autoRepairBlocker(repo, pr, checks, findings, stats) {
   return null;
 }
 
-function latestReviewNotes(pr, reviewComments) {
+function latestReviewNotes(pr, reviewComments, reviewThreads = []) {
   const reviews = (pr.latestReviews ?? [])
     .filter((review) => review?.state && review.state !== "APPROVED")
     .slice(0, 5)
@@ -1007,15 +1556,27 @@ function latestReviewNotes(pr, reviewComments) {
       : "review";
     return `- ${path} by ${comment.user?.login ?? "unknown"}: ${String(comment.body ?? "").slice(0, 600)}`;
   });
-  return [...reviews, ...comments].join("\n");
+  const threads = actionableReviewThreads(reviewThreads).map(
+    (thread) => `- unresolved thread ${thread.id}: ${reviewThreadEvidence(thread)}`,
+  );
+  return [...reviews, ...comments, ...threads].join("\n");
 }
 
-function buildAutoRepairPrompt({ repo, number, pr, checks, findings, stats, reviewComments }) {
+function buildAutoRepairPrompt({
+  repo,
+  number,
+  pr,
+  checks,
+  findings,
+  stats,
+  reviewComments,
+  reviewThreads,
+}) {
   const files = (pr.files ?? [])
     .slice(0, 50)
     .map((file) => `- ${file.path} (+${file.additions ?? 0}/-${file.deletions ?? 0})`)
     .join("\n");
-  const notes = latestReviewNotes(pr, reviewComments);
+  const notes = latestReviewNotes(pr, reviewComments, reviewThreads);
   return [
     "You are ClawSweeper's autonomous PR repair worker for Amuze.",
     "",
@@ -1086,7 +1647,7 @@ function postAutoRepairComment(repo, number, pr, pushedSha, summary) {
 }
 
 function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
-  const { pr, checks, findings, stats, reviewComments } = inspection;
+  const { pr, checks, findings, stats, reviewComments, reviewThreads } = inspection;
   const state = readRepairState(repo, number);
   const maxAttempts = Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_ATTEMPTS_PER_HEAD ?? 1);
   if (state.headSha === pr.headRefOid && Number(state.attempts ?? 0) >= maxAttempts) {
@@ -1097,7 +1658,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     };
   }
 
-  const blocker = autoRepairBlocker(repo, pr, checks, findings, stats);
+  const blocker = autoRepairBlocker(repo, pr, checks, findings, stats, reviewThreads);
   if (blocker) return { action: "blocked", reason: blocker, continueToComment: true };
 
   writeRepairState(repo, number, {
@@ -1115,6 +1676,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     findings,
     stats,
     reviewComments,
+    reviewThreads,
   });
   const repairDir = join(artifactRoot, "repairs", repoSlug(repo), String(number), pr.headRefOid);
   ensureDir(repairDir);
@@ -1220,7 +1782,30 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     { cwd: targetDir },
   );
   const pushedSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
-  run("git", ["push", "origin", `HEAD:${pr.headRefName}`], { cwd: targetDir });
+  const push = runBestEffort(
+    "git",
+    [
+      "push",
+      `--force-with-lease=${pr.headRefName}:${pr.headRefOid}`,
+      "origin",
+      `HEAD:${pr.headRefName}`,
+    ],
+    { cwd: targetDir },
+  );
+  if (push.error || push.status !== 0) {
+    const reason =
+      push.error?.message || push.stderr || push.stdout || `git push exited ${push.status}`;
+    writeRepairState(repo, number, {
+      headSha: pr.headRefOid,
+      status: "head_moved",
+      reason: String(reason).slice(0, 1000),
+    });
+    return {
+      action: "head_moved",
+      reason: `push rejected, head moved since inspection: ${String(reason).slice(0, 300)}`,
+      continueToComment: false,
+    };
+  }
   const summary = existsSync(outputPath) ? readFileSync(outputPath, "utf8").trim() : "";
   const comment = postAutoRepairComment(repo, number, pr, pushedSha, summary);
   writeRepairState(repo, number, {
@@ -1231,6 +1816,11 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     summary: summary.slice(0, 1000),
     commentUrl: comment?.html_url,
   });
+  emitReceipt(
+    `clawsweeper:${repo}#${number}`,
+    "staged",
+    `Pushed repair ${pushedSha} over exact head ${pr.headRefOid}; awaiting CI and independent exact-head review. Reverse: git revert ${pushedSha} on ${pr.headRefName} in ${repo}.`,
+  );
   return {
     action: "pushed",
     pushedSha,
@@ -1259,10 +1849,32 @@ function reviewItem({
   ensureDir(reviewDir);
   ensureDir(itemsDir);
   const common = ["--target-repo", repo, "--items-dir", itemsDir, "--item-number", String(number)];
-  const codexEnabled =
-    process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "1" ||
-    process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "true";
+  const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   const inspection = inspectPr(repo, number);
+  if (currentRepairForHead(repo, number, inspection.pr.headRefOid)) {
+    const repairMerge = autoMergeAgentRepairPr({ repo, number, inspection, adminMerge });
+    if (repairMerge.action === "merged") {
+      return {
+        mode: "autonomous-repair-merge",
+        merge: repairMerge,
+        status: "repair_merged",
+      };
+    }
+    if (repairMerge.action === "waiting") {
+      return {
+        mode: "autonomous-repair-wait",
+        merge: repairMerge,
+        status: "repair_waiting_checks",
+      };
+    }
+    if (["human", "blocked"].includes(repairMerge.action)) {
+      return {
+        mode: "autonomous-repair-paused",
+        merge: repairMerge,
+        status: "repair_needs_human",
+      };
+    }
+  }
   if (automergeDependabot && isDependabotLikePr(inspection.pr)) {
     const merge = autoMergeDependabotPr({
       repo,
@@ -1278,18 +1890,15 @@ function reviewItem({
         status: "dependabot_merged",
       };
     }
-    if (!merge.continueToComment) {
+    const canProgressToRepair = merge.needsRepair && autorepair;
+    const canProgressToReview = merge.needsAgentReview && codexEnabled;
+    if (!canProgressToRepair && !canProgressToReview) {
       return {
         mode: "autonomous-dependabot-merge",
         merge,
         status: `dependabot_merge_${merge.action}`,
       };
     }
-    return {
-      mode: "autonomous-dependabot-merge",
-      merge,
-      status: "dependabot_merge_blocked",
-    };
   }
   if (automergeMacroscopeLowRisk && isLowRiskMacroscopeCandidate(inspection.pr)) {
     const merge = autoMergeMacroscopeLowRiskPr({ repo, number, inspection });
@@ -1300,18 +1909,15 @@ function reviewItem({
         status: "macroscope_low_risk_merged",
       };
     }
-    if (!merge.continueToComment) {
+    const canProgressToRepair = merge.needsRepair && autorepair;
+    const canProgressToReview = merge.needsAgentReview && codexEnabled;
+    if (!canProgressToRepair && !canProgressToReview) {
       return {
         mode: "autonomous-macroscope-low-risk-merge",
         merge,
         status: `macroscope_low_risk_merge_${merge.action}`,
       };
     }
-    return {
-      mode: "autonomous-macroscope-low-risk-merge",
-      merge,
-      status: "macroscope_low_risk_merge_blocked",
-    };
   }
   if (autorepair) {
     const repair = autoRepairPr({ repo, number, model, inspection, codexTimeoutMs });
@@ -1362,7 +1968,7 @@ function reviewItem({
         "--codex-timeout-ms",
         String(codexTimeoutMs),
         "--additional-prompt",
-        "This is the Amuze fallback runner using Jay's GitHub auth because the upstream ClawSweeper GitHub App private key is unavailable. Stay read-only. Do not propose auto-close or branch mutations.",
+        "This is an independent SHIPRIGHT exact-head review for the Amuze closed-loop runner. Stay read-only and do not mutate branches. Emit a pass verdict only when current-head checks and the patch evidence support it, there are no actionable P findings, and no unresolved current review feedback remains. Otherwise emit needs-repair or needs-human with concrete evidence.",
       ],
       { timeoutMs: codexTimeoutMs + 120_000, env: targetEnv },
     );
@@ -1385,7 +1991,7 @@ function reviewItem({
       ],
       { env: targetEnv },
     );
-    return { mode: "codex", copied };
+    return { mode: "codex", copied, status: "agent_review_synced" };
   } catch (error) {
     const copied = existsSync(reviewDir) ? copyReviewArtifacts(reviewDir, itemsDir, repo) : [];
     const comment = deterministicFallbackComment(repo, number, error.message, inspection);
@@ -1406,9 +2012,7 @@ function main() {
   const adminMerge = autoMergeAdminEnabled(args);
   const requireMacroscopeApproval = requireMacroscopeApprovalEnabled(args);
   const repos = listRepos(org, args.repos);
-  const codexEnabled =
-    process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "1" ||
-    process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW === "true";
+  const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   let processed = 0;
   const summary = [];
   for (const repo of repos) {
@@ -1419,9 +2023,13 @@ function main() {
     let due = [];
     try {
       const capacity = Math.max(1, maxItems - processed);
-      due = codexEnabled
-        ? planDueItems(repo, itemsDir, maxPages, capacity)
-        : listOpenPullRequestNumbers(repo, maxPages);
+      if (codexEnabled) {
+        const activeLoopItems = listActiveLoopItemNumbers(repo, maxPages);
+        const plannedItems = planDueItems(repo, itemsDir, maxPages, capacity);
+        due = [...new Set([...activeLoopItems, ...plannedItems])];
+      } else {
+        due = listOpenPullRequestNumbers(repo, maxPages);
+      }
     } catch (error) {
       summary.push({ repo, status: "plan_failed", error: error.message });
       appendHistory({ repo, status: "plan_failed", error: error.message });
@@ -1469,4 +2077,22 @@ function main() {
   if (processed === 0) process.exitCode = 0;
 }
 
-main();
+export {
+  actionableReviewThreads,
+  agentRepairReadiness,
+  autoMergeDependabotBlocker,
+  autoRepairBlocker,
+  deterministicFindings,
+  hasExactHeadAgentPass,
+  latestExactHeadAgentVerdict,
+  loopStateRequiresTurn,
+  macroscopeApprovalBlocker,
+  mergeProgressionFlags,
+  mergeSignalFingerprint,
+  nextMergeAttempt,
+  unresolvedOutdatedReviewThreads,
+};
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}
