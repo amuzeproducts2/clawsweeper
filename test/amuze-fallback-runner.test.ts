@@ -6,6 +6,7 @@ import {
   autoMergeDependabotBlocker,
   autoRepairBlocker,
   deterministicFindings,
+  duePullRequestNumbers,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
@@ -21,6 +22,13 @@ import {
 } from "../scripts/amuze-fallback-runner.mjs";
 
 const headSha = "abc123def456";
+
+test("the PR-only lane drops planned issues before review", () => {
+  assert.deepEqual(
+    duePullRequestNumbers([59], [70, 59, 58], [{ number: 59 }, { number: 58 }]),
+    [59, 58],
+  );
+});
 
 function pullRequest(overrides = {}) {
   return {

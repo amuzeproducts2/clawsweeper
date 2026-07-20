@@ -263,6 +263,13 @@ function listOpenPullRequestNumbers(repo, maxPages) {
   return prs.sort((left, right) => prPriority(left) - prPriority(right)).map((pr) => pr.number);
 }
 
+function duePullRequestNumbers(activeLoopItems, plannedItems, openPullRequests) {
+  const openNumbers = new Set((openPullRequests ?? []).map((pr) => pr.number));
+  return [...new Set([...(activeLoopItems ?? []), ...(plannedItems ?? [])])].filter((number) =>
+    openNumbers.has(number),
+  );
+}
+
 function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
   if (repairState.status === "pushed" && repairState.pushedSha === pr.headRefOid) return true;
   if (mergeState.headSha !== pr.headRefOid) return false;
@@ -273,8 +280,8 @@ function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
   );
 }
 
-function listActiveLoopItemNumbers(repo, maxPages) {
-  return listOpenPullRequests(repo, maxPages)
+function activeLoopItemNumbersFromPullRequests(repo, openPullRequests) {
+  return openPullRequests
     .filter((pr) =>
       loopStateRequiresTurn(pr, readRepairState(repo, pr.number), readMergeState(repo, pr.number)),
     )
@@ -2177,9 +2184,10 @@ function main() {
     try {
       const capacity = Math.max(1, maxItems - processed);
       if (codexEnabled) {
-        const activeLoopItems = listActiveLoopItemNumbers(repo, maxPages);
+        const openPullRequests = listOpenPullRequests(repo, maxPages);
+        const activeLoopItems = activeLoopItemNumbersFromPullRequests(repo, openPullRequests);
         const plannedItems = planDueItems(repo, itemsDir, maxPages, capacity);
-        due = [...new Set([...activeLoopItems, ...plannedItems])];
+        due = duePullRequestNumbers(activeLoopItems, plannedItems, openPullRequests);
       } else {
         due = listOpenPullRequestNumbers(repo, maxPages);
       }
@@ -2238,6 +2246,7 @@ export {
   autoMergeDependabotBlocker,
   autoRepairBlocker,
   deterministicFindings,
+  duePullRequestNumbers,
   hasExactHeadAgentPass,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
