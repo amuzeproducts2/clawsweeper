@@ -14,6 +14,7 @@ import {
   mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  openPullRequestLimit,
   paginatedRestItems,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
@@ -24,6 +25,7 @@ import {
 const headSha = "abc123def456";
 
 test("the PR-only lane drops planned issues before review", () => {
+  assert.equal(openPullRequestLimit(5), 500);
   assert.deepEqual(
     duePullRequestNumbers([59], [70, 59, 58], [{ number: 59 }, { number: 58 }]),
     [59, 58],

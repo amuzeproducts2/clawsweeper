@@ -243,7 +243,7 @@ function planDueItems(repo, itemsDir, maxPages, capacity) {
 }
 
 function listOpenPullRequests(repo, maxPages) {
-  const limit = Math.max(1, Math.min(100, maxPages * 100));
+  const limit = openPullRequestLimit(maxPages);
   return runJson("gh", [
     "pr",
     "list",
@@ -256,6 +256,12 @@ function listOpenPullRequests(repo, maxPages) {
     "--json",
     "number,updatedAt,author,isDraft,mergeable,reviewDecision,headRefOid",
   ]);
+}
+
+function openPullRequestLimit(maxPages) {
+  const parsed = Number(maxPages);
+  const pages = Number.isFinite(parsed) ? Math.max(1, Math.floor(parsed)) : 1;
+  return pages * 100;
 }
 
 function listOpenPullRequestNumbers(repo, maxPages) {
@@ -2255,6 +2261,7 @@ export {
   mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  openPullRequestLimit,
   paginatedRestItems,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
