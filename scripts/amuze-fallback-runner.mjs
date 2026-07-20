@@ -325,34 +325,55 @@ function issueComments(repo, number) {
   return runJson("gh", ["api", `repos/${repo}/issues/${number}/comments?per_page=100`]);
 }
 
-function reviewThreadsFromGraphql(result) {
+function reviewThreadsPageFromGraphql(result) {
   if (result?.errors?.length) {
     throw new Error(
       `GitHub review-thread query failed: ${JSON.stringify(result.errors).slice(0, 1000)}`,
     );
   }
-  const threads = result?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  const connection = result?.data?.repository?.pullRequest?.reviewThreads;
+  const threads = connection?.nodes;
   if (!Array.isArray(threads)) {
     throw new Error("GitHub review-thread query returned no thread state; refusing to fail open");
   }
-  return threads;
+  const pageInfo = connection?.pageInfo;
+  if (typeof pageInfo?.hasNextPage !== "boolean" || (pageInfo.hasNextPage && !pageInfo.endCursor)) {
+    throw new Error(
+      "GitHub review-thread query returned no pagination state; refusing to fail open",
+    );
+  }
+  return { threads, pageInfo };
+}
+
+function reviewThreadsFromGraphql(result) {
+  return reviewThreadsPageFromGraphql(result).threads;
 }
 
 function pullRequestReviewThreads(repo, number) {
   const [owner, name] = repo.split("/");
-  const result = runJson("gh", [
-    "api",
-    "graphql",
-    "-F",
-    `owner=${owner}`,
-    "-F",
-    `name=${name}`,
-    "-F",
-    `number=${number}`,
-    "-f",
-    "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:100){nodes{author{login} body url createdAt updatedAt}}}}}}}",
-  ]);
-  return reviewThreadsFromGraphql(result);
+  const threads = [];
+  let cursor = null;
+  do {
+    const args = [
+      "api",
+      "graphql",
+      "-F",
+      `owner=${owner}`,
+      "-F",
+      `name=${name}`,
+      "-F",
+      `number=${number}`,
+    ];
+    if (cursor) args.push("-F", `cursor=${cursor}`);
+    args.push(
+      "-f",
+      "query=query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{id isResolved isOutdated path line comments(first:100){nodes{author{login} body url createdAt updatedAt}}} pageInfo{hasNextPage endCursor}}}}}",
+    );
+    const page = reviewThreadsPageFromGraphql(runJson("gh", args));
+    threads.push(...page.threads);
+    cursor = page.pageInfo.hasNextPage ? page.pageInfo.endCursor : null;
+  } while (cursor);
+  return threads;
 }
 
 function actionableReviewThreads(reviewThreads = []) {
@@ -2142,6 +2163,7 @@ export {
   mergeSignalFingerprint,
   nextMergeAttempt,
   reviewThreadsFromGraphql,
+  reviewThreadsPageFromGraphql,
   unresolvedOutdatedReviewThreads,
 };
 

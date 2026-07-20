@@ -13,6 +13,7 @@ import {
   mergeSignalFingerprint,
   nextMergeAttempt,
   reviewThreadsFromGraphql,
+  reviewThreadsPageFromGraphql,
   unresolvedOutdatedReviewThreads,
 } from "../scripts/amuze-fallback-runner.mjs";
 
@@ -90,9 +91,62 @@ test("review-thread state fails closed without a trustworthy GraphQL result", ()
   );
   assert.deepEqual(
     reviewThreadsFromGraphql({
-      data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      },
     }),
     [],
+  );
+  assert.throws(
+    () =>
+      reviewThreadsFromGraphql({
+        data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+      }),
+    /pagination state/,
+  );
+});
+
+test("review-thread pages require a cursor before following pagination", () => {
+  assert.deepEqual(
+    reviewThreadsPageFromGraphql({
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [activeThread()],
+              pageInfo: { hasNextPage: true, endCursor: "cursor-100" },
+            },
+          },
+        },
+      },
+    }),
+    {
+      threads: [activeThread()],
+      pageInfo: { hasNextPage: true, endCursor: "cursor-100" },
+    },
+  );
+  assert.throws(
+    () =>
+      reviewThreadsPageFromGraphql({
+        data: {
+          repository: {
+            pullRequest: {
+              reviewThreads: {
+                nodes: [],
+                pageInfo: { hasNextPage: true, endCursor: null },
+              },
+            },
+          },
+        },
+      }),
+    /pagination state/,
   );
 });
 
