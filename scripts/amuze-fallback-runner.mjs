@@ -831,6 +831,7 @@ function pauseExhaustedMerge(repo, number, pr, strategy, attemptPlan) {
     headSha: pr.headRefOid,
     status: "paused",
     strategy,
+    attempts: Math.max(attemptPlan.maxAttempts, attemptPlan.attempt - 1),
     reason,
   });
   emitReceipt(
@@ -1042,11 +1043,9 @@ function autoMergeDependabotPr({
   const state = readMergeState(repo, number);
   const strategy = adminMerge ? "admin-squash-v1" : "direct-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
-  if (
-    state.headSha === pr.headRefOid &&
-    state.strategy === strategy &&
-    (state.status === "merged" || (state.status === "blocked" && state.fingerprint === fingerprint))
-  ) {
+  const sameMergeLane = state.headSha === pr.headRefOid && state.strategy === strategy;
+  const sameBlockedSignals = state.status === "blocked" && state.fingerprint === fingerprint;
+  if (sameMergeLane && (state.status === "merged" || sameBlockedSignals)) {
     return {
       action: "skipped",
       reason:
