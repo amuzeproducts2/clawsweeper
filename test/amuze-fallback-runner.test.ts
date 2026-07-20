@@ -347,6 +347,22 @@ test("merge attempts pause after a bounded number of same-head failures", () => 
   );
   assert.equal(
     nextMergeAttempt(
+      { status: "blocked", headSha, strategy: "squash-v1", attempts: 3 },
+      headSha,
+      "squash-v1",
+    ).allowed,
+    false,
+  );
+  assert.equal(
+    nextMergeAttempt(
+      { status: "blocked", headSha, strategy: "squash-v1", attempts: 0 },
+      headSha,
+      "squash-v1",
+    ).allowed,
+    true,
+  );
+  assert.equal(
+    nextMergeAttempt(
       { status: "failed", headSha, strategy: "squash-v1", attempts: 3 },
       "new-head",
       "squash-v1",

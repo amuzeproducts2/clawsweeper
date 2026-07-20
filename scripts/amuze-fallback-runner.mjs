@@ -900,12 +900,12 @@ function nextMergeAttempt(state, headSha, strategy) {
   const maxAttempts = Number.isFinite(configuredMax) ? Math.max(1, configuredMax) : 3;
   const sameLane = state.headSha === headSha && state.strategy === strategy;
   const previousAttempts = sameLane ? Number(state.attempts ?? 0) : 0;
+  const exhaustedLane =
+    sameLane &&
+    previousAttempts >= maxAttempts &&
+    ["blocked", "failed", "started"].includes(state.status);
   return {
-    allowed: !(
-      sameLane &&
-      (state.status === "paused" ||
-        (["failed", "started"].includes(state.status) && previousAttempts >= maxAttempts))
-    ),
+    allowed: !(sameLane && state.status === "paused") && !exhaustedLane,
     attempt: previousAttempts + 1,
     maxAttempts,
   };
