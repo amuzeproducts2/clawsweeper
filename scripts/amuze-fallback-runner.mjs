@@ -266,7 +266,8 @@ function listOpenPullRequestNumbers(repo, maxPages) {
 function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
   if (repairState.status === "pushed" && repairState.pushedSha === pr.headRefOid) return true;
   if (mergeState.headSha !== pr.headRefOid) return false;
-  if (!["blocked", "failed", "started"].includes(mergeState.status)) return false;
+  if (mergeState.status === "failed") return true;
+  if (!["blocked", "started"].includes(mergeState.status)) return false;
   return /checks|Macroscope|agent approval|review decision|review thread|merge failed/i.test(
     mergeState.reason ?? "merge started",
   );
@@ -324,25 +325,34 @@ function issueComments(repo, number) {
   return runJson("gh", ["api", `repos/${repo}/issues/${number}/comments?per_page=100`]);
 }
 
+function reviewThreadsFromGraphql(result) {
+  if (result?.errors?.length) {
+    throw new Error(
+      `GitHub review-thread query failed: ${JSON.stringify(result.errors).slice(0, 1000)}`,
+    );
+  }
+  const threads = result?.data?.repository?.pullRequest?.reviewThreads?.nodes;
+  if (!Array.isArray(threads)) {
+    throw new Error("GitHub review-thread query returned no thread state; refusing to fail open");
+  }
+  return threads;
+}
+
 function pullRequestReviewThreads(repo, number) {
   const [owner, name] = repo.split("/");
-  const result = runJsonBestEffort(
-    "gh",
-    [
-      "api",
-      "graphql",
-      "-F",
-      `owner=${owner}`,
-      "-F",
-      `name=${name}`,
-      "-F",
-      `number=${number}`,
-      "-f",
-      "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:100){nodes{author{login} body url createdAt}}}}}}}",
-    ],
-    null,
-  );
-  return result?.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
+  const result = runJson("gh", [
+    "api",
+    "graphql",
+    "-F",
+    `owner=${owner}`,
+    "-F",
+    `name=${name}`,
+    "-F",
+    `number=${number}`,
+    "-f",
+    "query=query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated path line comments(first:100){nodes{author{login} body url createdAt updatedAt}}}}}}}",
+  ]);
+  return reviewThreadsFromGraphql(result);
 }
 
 function actionableReviewThreads(reviewThreads = []) {
@@ -702,23 +712,41 @@ function configuredAgentReviewAuthors() {
 function latestExactHeadAgentVerdict(pr, comments = []) {
   const trustedAuthors = configuredAgentReviewAuthors();
   let verdict = null;
-  for (const comment of comments) {
+  for (const [commentIndex, comment] of comments.entries()) {
     const login = String(comment?.user?.login ?? comment?.author?.login ?? "").toLowerCase();
     const body = String(comment?.body ?? "");
     if (!trustedAuthors.has(login) || !body.includes("<!-- clawsweeper-review item=")) continue;
+    const timestamp =
+      Date.parse(
+        comment?.updated_at ??
+          comment?.updatedAt ??
+          comment?.created_at ??
+          comment?.createdAt ??
+          "1970-01-01T00:00:00Z",
+      ) || 0;
     for (const marker of body.matchAll(
       /<!--\s*clawsweeper-verdict:(pass|needs-changes|needs-repair|needs-human|human-review)\b[^>]*\bsha=([a-f0-9]+)\b[^>]*-->/gi,
     )) {
       if (marker[2] !== pr.headRefOid) continue;
-      verdict = {
-        verdict: marker[1].toLowerCase(),
-        author: login,
-        commentId: comment?.id ?? null,
-        url: comment?.html_url ?? comment?.url ?? null,
-      };
+      if (
+        !verdict ||
+        timestamp > verdict.timestamp ||
+        (timestamp === verdict.timestamp && commentIndex >= verdict.commentIndex)
+      ) {
+        verdict = {
+          verdict: marker[1].toLowerCase(),
+          author: login,
+          commentId: comment?.id ?? null,
+          url: comment?.html_url ?? comment?.url ?? null,
+          timestamp,
+          commentIndex,
+        };
+      }
     }
   }
-  return verdict;
+  if (!verdict) return null;
+  const { timestamp: _timestamp, commentIndex: _commentIndex, ...result } = verdict;
+  return result;
 }
 
 function hasExactHeadAgentPass(pr, comments = []) {
@@ -728,6 +756,11 @@ function hasExactHeadAgentPass(pr, comments = []) {
 function mergeSignalFingerprint({ pr, checks, reviews, conversationComments, reviewThreads }) {
   const payload = {
     headSha: pr.headRefOid,
+    isDraft: pr.isDraft === true,
+    labels: (pr.labels ?? [])
+      .map((label) => label?.name)
+      .filter(Boolean)
+      .sort(),
     reviewDecision: pr.reviewDecision ?? null,
     mergeable: pr.mergeable ?? null,
     checks: (checks ?? [])
@@ -763,8 +796,8 @@ function nextMergeAttempt(state, headSha, strategy) {
   return {
     allowed: !(
       sameLane &&
-      ["failed", "started"].includes(state.status) &&
-      previousAttempts >= maxAttempts
+      (state.status === "paused" ||
+        (["failed", "started"].includes(state.status) && previousAttempts >= maxAttempts))
     ),
     attempt: previousAttempts + 1,
     maxAttempts,
@@ -1257,6 +1290,10 @@ function agentRepairReadiness(
   if (stats.files > Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_FILES ?? 20)) {
     return { status: "human", reason: `too many changed files (${stats.files})` };
   }
+  const changedLines = (stats.additions ?? 0) + (stats.deletions ?? 0);
+  if (changedLines > Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_LINES ?? 800)) {
+    return { status: "human", reason: `too many changed lines (${changedLines})` };
+  }
   const activeThreads = actionableReviewThreads(reviewThreads);
   if (activeThreads.length) {
     return {
@@ -1302,10 +1339,23 @@ function resolveOutdatedReviewThreads(repo, reviewThreads = []) {
   return resolved;
 }
 
-function autoMergeAgentRepairPr({ repo, number, inspection, adminMerge }) {
+function autoMergeAgentRepairPr({ repo, number, inspection }) {
   const { pr, reviewThreads } = inspection;
   const readiness = agentRepairReadiness(repo, number, inspection);
   if (readiness.status !== "ready") {
+    if (readiness.status === "human") {
+      writeRepairState(repo, number, {
+        headSha: pr.headRefOid,
+        status: "paused",
+        pausedSha: pr.headRefOid,
+        reason: readiness.reason,
+      });
+      emitReceipt(
+        `clawsweeper:${repo}#${number}`,
+        "unexpected",
+        `Paused repaired head ${pr.headRefOid} for human-only handling: ${readiness.reason}`,
+      );
+    }
     return {
       action: readiness.status,
       reason: readiness.reason,
@@ -1315,7 +1365,7 @@ function autoMergeAgentRepairPr({ repo, number, inspection, adminMerge }) {
   }
 
   const state = readMergeState(repo, number);
-  const strategy = adminMerge ? "agent-repair-admin-squash-v1" : "agent-repair-squash-v1";
+  const strategy = "agent-repair-squash-v1";
   if (state.headSha === pr.headRefOid && state.strategy === strategy && state.status === "merged") {
     return { action: "skipped", reason: "repair already merged", continueToReview: false };
   }
@@ -1349,7 +1399,6 @@ function autoMergeAgentRepairPr({ repo, number, inspection, adminMerge }) {
     "--body",
     `Merged by ClawSweeper after repair, green exact-head checks, independent frontier review, and zero actionable review threads for ${pr.headRefOid}.`,
   ];
-  if (adminMerge) mergeArgs.push("--admin");
   const result = runBestEffort("gh", mergeArgs);
   if (result.error || result.status !== 0) {
     const reason =
@@ -1852,7 +1901,7 @@ function reviewItem({
   const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   const inspection = inspectPr(repo, number);
   if (currentRepairForHead(repo, number, inspection.pr.headRefOid)) {
-    const repairMerge = autoMergeAgentRepairPr({ repo, number, inspection, adminMerge });
+    const repairMerge = autoMergeAgentRepairPr({ repo, number, inspection });
     if (repairMerge.action === "merged") {
       return {
         mode: "autonomous-repair-merge",
@@ -2062,6 +2111,8 @@ function main() {
           "dependabot_merge_blocked",
           "macroscope_low_risk_merge_skipped",
           "macroscope_low_risk_merge_blocked",
+          "repair_waiting_checks",
+          "repair_needs_human",
         ].includes(status);
         if (consumedBudget) processed += 1;
         summary.push({ repo, number, status, ...result });
@@ -2090,6 +2141,7 @@ export {
   mergeProgressionFlags,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  reviewThreadsFromGraphql,
   unresolvedOutdatedReviewThreads,
 };
 

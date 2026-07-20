@@ -12,6 +12,7 @@ import {
   mergeProgressionFlags,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  reviewThreadsFromGraphql,
   unresolvedOutdatedReviewThreads,
 } from "../scripts/amuze-fallback-runner.mjs";
 
@@ -81,6 +82,20 @@ test("review thread classification excludes resolved and outdated threads", () =
   );
 });
 
+test("review-thread state fails closed without a trustworthy GraphQL result", () => {
+  assert.throws(() => reviewThreadsFromGraphql(null), /refusing to fail open/);
+  assert.throws(
+    () => reviewThreadsFromGraphql({ errors: [{ message: "auth failed" }] }),
+    /review-thread query failed/,
+  );
+  assert.deepEqual(
+    reviewThreadsFromGraphql({
+      data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } },
+    }),
+    [],
+  );
+});
+
 test("deterministic findings and autorepair ingest current review threads", () => {
   const pr = pullRequest({
     author: { login: "codex" },
@@ -116,6 +131,24 @@ test("agent approval fallback is exact-head, attributed, and thread-clean", () =
   assert.match(
     macroscopeApprovalBlocker(pr, passingChecks(), [], [agentPass()], [activeThread()]) ?? "",
     /unresolved actionable review thread/,
+  );
+});
+
+test("latest exact-head verdict uses update time instead of array order", () => {
+  const blocking = {
+    ...agentPass(),
+    id: 41,
+    updated_at: "2026-07-20T18:00:00Z",
+    body: agentPass().body.replace("verdict:pass", "verdict:needs-human"),
+  };
+  const stalePass = {
+    ...agentPass(),
+    id: 42,
+    updated_at: "2026-07-20T17:00:00Z",
+  };
+  assert.equal(
+    latestExactHeadAgentVerdict(pullRequest(), [blocking, stalePass])?.verdict,
+    "needs-human",
   );
 });
 
@@ -169,6 +202,18 @@ test("pending loop state is re-enqueued after the review planner considers it cu
       pr,
       {},
       {
+        status: "failed",
+        headSha,
+        reason: "spawnSync gh EPERM",
+      },
+    ),
+    true,
+  );
+  assert.equal(
+    loopStateRequiresTurn(
+      pr,
+      {},
+      {
         status: "blocked",
         headSha: "stale-head",
         reason: "checks are not all green",
@@ -194,6 +239,14 @@ test("merge attempts pause after a bounded number of same-head failures", () => 
   );
   assert.equal(
     nextMergeAttempt(
+      { status: "paused", headSha, strategy: "squash-v1", attempts: 3 },
+      headSha,
+      "squash-v1",
+    ).allowed,
+    false,
+  );
+  assert.equal(
+    nextMergeAttempt(
       { status: "failed", headSha, strategy: "squash-v1", attempts: 3 },
       "new-head",
       "squash-v1",
@@ -216,6 +269,13 @@ test("merge fingerprint changes when review signals change", () => {
       ...base,
       conversationComments: [agentPass()],
       reviewThreads: [activeThread({ isResolved: true })],
+    }),
+  );
+  assert.notEqual(
+    mergeSignalFingerprint(base),
+    mergeSignalFingerprint({
+      ...base,
+      pr: pullRequest({ isDraft: true, labels: [{ name: "blocked" }] }),
     }),
   );
 });
@@ -255,5 +315,19 @@ test("repaired heads wait for checks, then require exact-head review, then becom
       repairState,
     ).status,
     "ready",
+  );
+  assert.equal(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      {
+        ...base,
+        stats: { files: 1, additions: 801, deletions: 0 },
+        checks: passingChecks(),
+        conversationComments: [agentPass()],
+      },
+      repairState,
+    ).status,
+    "human",
   );
 });
