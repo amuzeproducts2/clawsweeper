@@ -4,9 +4,12 @@ import {
   actionableReviewThreads,
   agentRepairReadiness,
   autoMergeDependabotBlocker,
+  autoMergeMacroscopeLowRiskBlocker,
   autoRepairBlocker,
   deterministicFindings,
   duePullRequestNumbers,
+  exactFetchedPullRequestHead,
+  isLowRiskMacroscopeCandidate,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
@@ -29,6 +32,19 @@ test("the PR-only lane drops planned issues before review", () => {
   assert.deepEqual(
     duePullRequestNumbers([59], [70, 59, 58], [{ number: 59 }, { number: 58 }]),
     [59, 58],
+  );
+});
+
+test("repair checkout accepts only the exact inspected pull-request head", () => {
+  const expected = "a".repeat(40);
+  assert.equal(exactFetchedPullRequestHead(expected, expected.toUpperCase()), expected);
+  assert.throws(
+    () => exactFetchedPullRequestHead(expected, "b".repeat(40)),
+    /pull request head moved before checkout/,
+  );
+  assert.throws(
+    () => exactFetchedPullRequestHead("short", expected),
+    /requires full expected and fetched head SHAs/,
   );
 });
 
@@ -242,6 +258,38 @@ test("Dependabot can merge on clean exact-head frontier approval without Macrosc
     true,
   );
   assert.equal(blocker, null);
+});
+
+test("Macroscope-approved low-risk candidates are not restricted to docs and tests", () => {
+  const repoHygienePr = pullRequest({
+    author: { login: "jaywillingham" },
+    headRefName: "cursor/setup-dev-environment",
+    reviewDecision: "APPROVED",
+    files: [
+      { path: "scripts/check_repo_hygiene.py", additions: 1, deletions: 0 },
+      { path: "tests/test_repo_hygiene.py", additions: 1, deletions: 0 },
+    ],
+  });
+  assert.equal(isLowRiskMacroscopeCandidate(repoHygienePr), true);
+  assert.equal(
+    autoMergeMacroscopeLowRiskBlocker(
+      repoHygienePr,
+      passingChecks(),
+      { files: 2, additions: 2, deletions: 0 },
+      [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+      [],
+      [],
+    ),
+    null,
+  );
+  assert.equal(
+    isLowRiskMacroscopeCandidate(
+      pullRequest({
+        files: [{ path: ".github/workflows/deploy.yml", additions: 1, deletions: 0 }],
+      }),
+    ),
+    false,
+  );
 });
 
 test("failed checks and active threads progress to repair instead of stalling at merge", () => {
