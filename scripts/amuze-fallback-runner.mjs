@@ -322,7 +322,20 @@ function copyReviewArtifacts(reviewDir, itemsDir, repo) {
 }
 
 function issueComments(repo, number) {
-  return runJson("gh", ["api", `repos/${repo}/issues/${number}/comments?per_page=100`]);
+  const pages = runJson("gh", [
+    "api",
+    "--paginate",
+    "--slurp",
+    `repos/${repo}/issues/${number}/comments?per_page=100`,
+  ]);
+  return paginatedRestItems(pages, "issue comments");
+}
+
+function paginatedRestItems(pages, label = "REST items") {
+  if (!Array.isArray(pages) || pages.some((page) => !Array.isArray(page))) {
+    throw new Error(`GitHub ${label} pagination returned incomplete state; refusing to fail open`);
+  }
+  return pages.flat();
 }
 
 function reviewThreadsPageFromGraphql(result) {
@@ -825,6 +838,20 @@ function unchangedMergeStateResult(state, checks = [], reviewThreads = []) {
   };
 }
 
+function activeUnchangedMergeState(
+  state,
+  headSha,
+  strategy,
+  fingerprint,
+  checks = [],
+  reviewThreads = [],
+) {
+  if (state.headSha !== headSha || state.strategy !== strategy) return null;
+  if (state.status === "merged") return unchangedMergeStateResult(state, checks, reviewThreads);
+  if (state.status !== "blocked" || state.fingerprint !== fingerprint) return null;
+  return unchangedMergeStateResult(state, checks, reviewThreads);
+}
+
 function lookupMergedCommit(repo, number) {
   const result = runBestEffort("gh", [
     "pr",
@@ -1102,11 +1129,15 @@ function autoMergeDependabotPr({
   const state = readMergeState(repo, number);
   const strategy = adminMerge ? "admin-squash-v1" : "direct-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
-  const sameMergeLane = state.headSha === pr.headRefOid && state.strategy === strategy;
-  const sameBlockedSignals = state.status === "blocked" && state.fingerprint === fingerprint;
-  if (sameMergeLane && (state.status === "merged" || sameBlockedSignals)) {
-    return unchangedMergeStateResult(state, checks, reviewThreads);
-  }
+  const unchanged = activeUnchangedMergeState(
+    state,
+    pr.headRefOid,
+    strategy,
+    fingerprint,
+    checks,
+    reviewThreads,
+  );
+  if (unchanged) return unchanged;
   const blocker = autoMergeDependabotBlocker(
     pr,
     checks,
@@ -1210,11 +1241,15 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
   const state = readMergeState(repo, number);
   const strategy = "macroscope-low-risk-squash-v1";
   const fingerprint = mergeSignalFingerprint(inspection);
-  const sameMergeLane = state.headSha === pr.headRefOid && state.strategy === strategy;
-  const sameBlockedSignals = state.status === "blocked" && state.fingerprint === fingerprint;
-  if (sameMergeLane && (state.status === "merged" || sameBlockedSignals)) {
-    return unchangedMergeStateResult(state, checks, reviewThreads);
-  }
+  const unchanged = activeUnchangedMergeState(
+    state,
+    pr.headRefOid,
+    strategy,
+    fingerprint,
+    checks,
+    reviewThreads,
+  );
+  if (unchanged) return unchanged;
   const blocker = autoMergeMacroscopeLowRiskBlocker(
     pr,
     checks,
@@ -2201,6 +2236,7 @@ export {
   mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  paginatedRestItems,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
   unchangedMergeStateResult,

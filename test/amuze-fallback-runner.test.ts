@@ -13,6 +13,7 @@ import {
   mergeReceiptRecord,
   mergeSignalFingerprint,
   nextMergeAttempt,
+  paginatedRestItems,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
   unchangedMergeStateResult,
@@ -149,6 +150,17 @@ test("review-thread pages require a cursor before following pagination", () => {
         },
       }),
     /pagination state/,
+  );
+});
+
+test("REST comment pagination is flattened and fails closed on malformed pages", () => {
+  assert.deepEqual(paginatedRestItems([[{ id: 1 }], [{ id: 2 }]], "issue comments"), [
+    { id: 1 },
+    { id: 2 },
+  ]);
+  assert.throws(
+    () => paginatedRestItems([[{ id: 1 }], null], "issue comments"),
+    /pagination returned incomplete state/,
   );
 });
 
