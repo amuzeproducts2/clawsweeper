@@ -4,9 +4,11 @@ import {
   actionableReviewThreads,
   agentRepairReadiness,
   autoMergeDependabotBlocker,
+  autoMergeMacroscopeLowRiskBlocker,
   autoRepairBlocker,
   deterministicFindings,
   duePullRequestNumbers,
+  isLowRiskMacroscopeCandidate,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
@@ -242,6 +244,38 @@ test("Dependabot can merge on clean exact-head frontier approval without Macrosc
     true,
   );
   assert.equal(blocker, null);
+});
+
+test("Macroscope-approved low-risk candidates are not restricted to docs and tests", () => {
+  const repoHygienePr = pullRequest({
+    author: { login: "jaywillingham" },
+    headRefName: "cursor/setup-dev-environment",
+    reviewDecision: "APPROVED",
+    files: [
+      { path: "scripts/check_repo_hygiene.py", additions: 1, deletions: 0 },
+      { path: "tests/test_repo_hygiene.py", additions: 1, deletions: 0 },
+    ],
+  });
+  assert.equal(isLowRiskMacroscopeCandidate(repoHygienePr), true);
+  assert.equal(
+    autoMergeMacroscopeLowRiskBlocker(
+      repoHygienePr,
+      passingChecks(),
+      { files: 2, additions: 2, deletions: 0 },
+      [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+      [],
+      [],
+    ),
+    null,
+  );
+  assert.equal(
+    isLowRiskMacroscopeCandidate(
+      pullRequest({
+        files: [{ path: ".github/workflows/deploy.yml", additions: 1, deletions: 0 }],
+      }),
+    ),
+    false,
+  );
 });
 
 test("failed checks and active threads progress to repair instead of stalling at merge", () => {

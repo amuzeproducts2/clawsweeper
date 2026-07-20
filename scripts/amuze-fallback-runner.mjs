@@ -1053,10 +1053,6 @@ function isDependabotLikePr(pr) {
   return author === "dependabot[bot]" || String(pr.headRefName ?? "").startsWith("dependabot/");
 }
 
-function lowRiskMacroscopePath(path) {
-  return isDocsOnlyPath(path) || isTestPath(path);
-}
-
 function autoMergeMacroscopeLowRiskBlocker(
   pr,
   checks,
@@ -1092,9 +1088,7 @@ function autoMergeMacroscopeLowRiskBlocker(
   );
   if (macroscopeBlocker) return macroscopeBlocker;
 
-  if (!files.length || files.some((file) => !lowRiskMacroscopePath(file.path))) {
-    return "changed files are not docs/test-only";
-  }
+  if (!files.length) return "no changed files";
   if (files.some((file) => sensitivePathReason(file.path))) {
     return "sensitive path changed";
   }
@@ -1137,11 +1131,7 @@ function autoMergeMacroscopeLowRiskBlockerFromInspection(inspection) {
 
 function isLowRiskMacroscopeCandidate(pr) {
   const files = pr.files ?? [];
-  return (
-    files.length > 0 &&
-    files.every((file) => lowRiskMacroscopePath(file.path)) &&
-    !files.some((file) => sensitivePathReason(file.path))
-  );
+  return files.length > 0 && !files.some((file) => sensitivePathReason(file.path));
 }
 
 function prPriority(pr) {
@@ -2250,10 +2240,12 @@ export {
   actionableReviewThreads,
   agentRepairReadiness,
   autoMergeDependabotBlocker,
+  autoMergeMacroscopeLowRiskBlocker,
   autoRepairBlocker,
   deterministicFindings,
   duePullRequestNumbers,
   hasExactHeadAgentPass,
+  isLowRiskMacroscopeCandidate,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
   macroscopeApprovalBlocker,
