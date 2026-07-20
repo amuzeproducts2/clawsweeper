@@ -26,6 +26,7 @@ import {
 } from "./repository-profiles.js";
 import {
   codexEnv,
+  codexLoginConfig,
   codexModelArgs,
   PUBLIC_CODEX_MODEL,
   redactInternalCodexModel,
@@ -6626,7 +6627,7 @@ function runCodex(options: {
   }
   const codexConfig = [
     `model_reasoning_effort="${options.reasoningEffort}"`,
-    'forced_login_method="api"',
+    ...codexLoginConfig(),
     'approval_policy="never"',
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
@@ -6897,7 +6898,7 @@ function runCodexAssist(options: {
   writeFileSync(promptPath, prompt, "utf8");
   const codexConfig = [
     `model_reasoning_effort="${options.reasoningEffort}"`,
-    'forced_login_method="api"',
+    ...codexLoginConfig(),
     'approval_policy="never"',
   ];
   const result = spawnSync(

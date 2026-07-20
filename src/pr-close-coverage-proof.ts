@@ -1,8 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { codexModelArgs } from "./codex-env.js";
+import { codexEnv, codexLoginConfig, codexModelArgs } from "./codex-env.js";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { codexEnv } from "./codex-env.js";
 import { safeOutputTail, truncateText } from "./clawsweeper-text.js";
 
 export type PrCloseCoverageProofModelDecision = "covered" | "keep_open";
@@ -253,7 +252,7 @@ export function runPrCloseCoverageProofModel(options: {
   if (existsSync(outputPath)) unlinkSync(outputPath);
   const codexConfig = [
     `model_reasoning_effort="${options.runtime.reasoningEffort}"`,
-    'forced_login_method="api"',
+    ...codexLoginConfig(),
     'approval_policy="never"',
   ];
   if (options.runtime.serviceTier) {
