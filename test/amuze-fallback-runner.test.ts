@@ -8,6 +8,7 @@ import {
   autoRepairBlocker,
   deterministicFindings,
   duePullRequestNumbers,
+  exactFetchedPullRequestHead,
   isLowRiskMacroscopeCandidate,
   latestExactHeadAgentVerdict,
   loopStateRequiresTurn,
@@ -31,6 +32,19 @@ test("the PR-only lane drops planned issues before review", () => {
   assert.deepEqual(
     duePullRequestNumbers([59], [70, 59, 58], [{ number: 59 }, { number: 58 }]),
     [59, 58],
+  );
+});
+
+test("repair checkout accepts only the exact inspected pull-request head", () => {
+  const expected = "a".repeat(40);
+  assert.equal(exactFetchedPullRequestHead(expected, expected.toUpperCase()), expected);
+  assert.throws(
+    () => exactFetchedPullRequestHead(expected, "b".repeat(40)),
+    /pull request head moved before checkout/,
+  );
+  assert.throws(
+    () => exactFetchedPullRequestHead("short", expected),
+    /requires full expected and fetched head SHAs/,
   );
 });
 

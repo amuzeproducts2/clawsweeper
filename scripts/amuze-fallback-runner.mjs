@@ -315,10 +315,31 @@ function ensureTargetCheckout(repo) {
   if (!existsSync(join(targetDir, ".git"))) {
     run("gh", ["repo", "clone", repo, targetDir, "--", "--depth", "1"]);
   }
+  run("git", ["reset", "--hard"], { cwd: targetDir });
+  run("git", ["clean", "-ffd"], { cwd: targetDir });
   run("git", ["fetch", "origin", branch, "--depth", "1"], { cwd: targetDir });
   run("git", ["checkout", "-B", branch, `origin/${branch}`], { cwd: targetDir });
+  run("git", ["reset", "--hard", `origin/${branch}`], { cwd: targetDir });
   run("git", ["clean", "-ffd"], { cwd: targetDir });
   return { targetDir, branch };
+}
+
+function exactFetchedPullRequestHead(expectedHeadSha, fetchedHeadSha) {
+  const expected = String(expectedHeadSha ?? "")
+    .trim()
+    .toLowerCase();
+  const fetched = String(fetchedHeadSha ?? "")
+    .trim()
+    .toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(expected) || !/^[a-f0-9]{40}$/.test(fetched)) {
+    throw new Error("pull request checkout requires full expected and fetched head SHAs");
+  }
+  if (fetched !== expected) {
+    throw new Error(
+      `pull request head moved before checkout: expected ${expected}, fetched ${fetched}`,
+    );
+  }
+  return fetched;
 }
 
 function copyReviewArtifacts(reviewDir, itemsDir, repo) {
@@ -1766,13 +1787,23 @@ function buildAutoRepairPrompt({
   ].join("\n");
 }
 
-function checkoutPullRequest(repo, number) {
+function checkoutPullRequest(repo, number, expectedHeadSha) {
   const { targetDir } = ensureTargetCheckout(repo);
-  run("gh", ["pr", "checkout", String(number), "--repo", repo], { cwd: targetDir });
-  run("git", ["reset", "--hard"], { cwd: targetDir });
-  run("git", ["clean", "-ffd"], { cwd: targetDir });
-  run("gh", ["pr", "checkout", String(number), "--repo", repo], { cwd: targetDir });
-  return targetDir;
+  try {
+    run("git", ["fetch", "origin", `pull/${number}/head`, "--depth", "1"], {
+      cwd: targetDir,
+    });
+    const fetchedHeadSha = run("git", ["rev-parse", "FETCH_HEAD"], { cwd: targetDir }).trim();
+    const headSha = exactFetchedPullRequestHead(expectedHeadSha, fetchedHeadSha);
+    run("git", ["checkout", "--detach", headSha], { cwd: targetDir });
+    run("git", ["reset", "--hard", headSha], { cwd: targetDir });
+    run("git", ["clean", "-ffd"], { cwd: targetDir });
+    return targetDir;
+  } catch (error) {
+    runBestEffort("git", ["reset", "--hard"], { cwd: targetDir });
+    runBestEffort("git", ["clean", "-ffd"], { cwd: targetDir });
+    throw error;
+  }
 }
 
 function diffNameOnly(targetDir) {
@@ -1823,7 +1854,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     status: "started",
   });
 
-  const targetDir = checkoutPullRequest(repo, number);
+  const targetDir = checkoutPullRequest(repo, number, pr.headRefOid);
   const prompt = buildAutoRepairPrompt({
     repo,
     number,
@@ -2244,6 +2275,7 @@ export {
   autoRepairBlocker,
   deterministicFindings,
   duePullRequestNumbers,
+  exactFetchedPullRequestHead,
   hasExactHeadAgentPass,
   isLowRiskMacroscopeCandidate,
   latestExactHeadAgentVerdict,
