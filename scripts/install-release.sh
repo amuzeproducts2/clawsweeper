@@ -242,7 +242,12 @@ mv -Tf "${RELEASES_ROOT}/.current-${VERSION}" "${RELEASES_ROOT}/current"
 SMOKE_TIMESTAMP_BEFORE="$(healthcheck_timestamp)"
 OPERATIONAL_METRICS_BEFORE="$(optional_checksum "${METRICS_PATH}")"
 install -m 0600 /dev/null "${STATE_DIR}/.install-smoke"
-"${SYSTEMCTL}" enable --now clawsweeper-orchestrator.timer
+# The service and installer intentionally share LOCK_PATH. Release the
+# cutover lock before starting the read-only smoke or the service will report
+# skipped_lock without exercising the new release. Keep the timer stopped
+# until the smoke has passed so no scheduled run can race this handoff.
+flock -u 9
+exec 9>&-
 "${SYSTEMCTL}" start clawsweeper-orchestrator.service
 SMOKE_TIMESTAMP_AFTER="$(healthcheck_timestamp)"
 if ! awk -v before="${SMOKE_TIMESTAMP_BEFORE}" -v after="${SMOKE_TIMESTAMP_AFTER}" \
@@ -255,11 +260,18 @@ if ! grep -Eq '^clawsweeper_healthcheck_success[[:space:]]+1([[:space:]]|$)' \
   echo "post-cutover smoke did not report a successful ClawSweeper run" >&2
   false
 fi
+if ! grep -Fqx -- \
+  "clawsweeper_healthcheck_release_info{revision=\"${VERSION}\"} 1" \
+  "${HEALTHCHECK_METRICS_PATH}"; then
+  echo "post-cutover smoke did not report the expected ClawSweeper release" >&2
+  false
+fi
 if [ "$(optional_checksum "${METRICS_PATH}")" != "${OPERATIONAL_METRICS_BEFORE}" ]; then
   echo "read-only install healthcheck changed operational ClawSweeper metrics" >&2
   false
 fi
 mv "${STATE_DIR}/.install-smoke" "${BACKUP_DIR}/install-smoke.completed"
+"${SYSTEMCTL}" enable --now clawsweeper-orchestrator.timer
 
 INSTALL_COMPLETE=1
 trap - ERR
