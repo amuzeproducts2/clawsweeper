@@ -467,7 +467,7 @@ fi
   const repos = ["amuzeproducts2/alpha", "amuzeproducts2/bravo", "amuzeproducts2/charlie"];
   const invoke = (environment = baseEnvironment) =>
     spawnSync(
-      "/opt/clawsweeper-node-v24.18.0/bin/node",
+      process.execPath,
       [
         entrypoint,
         ...repos.flatMap((repo) => ["--repo", repo]),
@@ -498,7 +498,7 @@ fi
   const operationalMetricsBeforeHealthcheck = readFileSync(metricsPath, "utf8");
   const healthMetricsPath = join(testRoot, "healthcheck.prom");
   const healthcheck = spawnSync(
-    "/opt/clawsweeper-node-v24.18.0/bin/node",
+    process.execPath,
     [entrypoint, "--healthcheck", "--max-runtime-seconds", "60"],
     {
       encoding: "utf8",
@@ -520,7 +520,7 @@ fi
 
   const failedStatePath = join(testRoot, "failed-scheduler-state.json");
   const failed = spawnSync(
-    "/opt/clawsweeper-node-v24.18.0/bin/node",
+    process.execPath,
     [
       entrypoint,
       "--repo",
@@ -575,7 +575,7 @@ fi
       .trim()
       .split("\n").length;
     const result = spawnSync(
-      "/opt/clawsweeper-node-v24.18.0/bin/node",
+      process.execPath,
       [
         entrypoint,
         ...priorityRepos.flatMap((repo) => ["--repo", repo]),
@@ -747,7 +747,7 @@ done
     encoding: "utf8",
     env: {
       ...environment,
-      TEST_NODE: "/opt/clawsweeper-node-v24.18.0/bin/node",
+      TEST_NODE: process.execPath,
       TEST_ROOT: testRoot,
     },
   });
@@ -931,7 +931,7 @@ done
     encoding: "utf8",
     env: {
       ...environment,
-      TEST_NODE: "/opt/clawsweeper-node-v24.18.0/bin/node",
+      TEST_NODE: process.execPath,
       TEST_ROOT: testRoot,
     },
   });
@@ -1020,18 +1020,14 @@ test(
     );
     chmodSync(join(root, "scripts", "smoke-release.mjs"), 0o755);
 
-    const smoke = spawnSync(
-      "/opt/clawsweeper-node-v24.18.0/bin/node",
-      [join(root, "scripts", "smoke-release.mjs"), root],
-      {
-        encoding: "utf8",
-        env: (() => {
-          const environment = { ...process.env };
-          delete environment.NODE_TEST_CONTEXT;
-          return environment;
-        })(),
-      },
-    );
+    const smoke = spawnSync(process.execPath, [join(root, "scripts", "smoke-release.mjs"), root], {
+      encoding: "utf8",
+      env: (() => {
+        const environment = { ...process.env };
+        delete environment.NODE_TEST_CONTEXT;
+        return environment;
+      })(),
+    });
     assert.equal(smoke.status, 0, smoke.stderr);
     assert.match(
       readFileSync(join(root, "scripts", "smoke-release.mjs"), "utf8"),
