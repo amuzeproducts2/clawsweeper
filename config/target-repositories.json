@@ -71,6 +71,19 @@
       "package_manager": "pnpm",
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "owner": "amuzeproducts2",
+      "deny_repositories": [],
+      "allow_repo_name_pattern": "^[A-Za-z0-9_.-]+$",
+      "prompt_note": "Use the current Amuze pull-request head and repository default branch. Operate as a closed-loop maintenance reviewer: identify actionable defects, require exact-head validation evidence, and emit a pass verdict only when there are no actionable review findings. Product, security, credential, permission, destructive-data, paid-action, and external-send decisions remain human-gated.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "npm",
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "core_target_overrides": {
@@ -84,7 +97,7 @@
     }
   },
   "target_inventory": {
-    "owners": ["openclaw", "steipete"],
+    "owners": ["openclaw", "steipete", "amuzeproducts2"],
     "deny_repositories": ["openclaw/clawsweeper-state", "openclaw/.github"],
     "include_private": false,
     "include_archived": false,

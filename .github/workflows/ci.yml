@@ -38,6 +38,7 @@ jobs:
             schema
             scripts
             src
+            systemd
             test
             .oxfmtrc.json
             AGENTS.md
@@ -50,6 +51,11 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/setup-pnpm
+
+      - name: Install Prometheus metric tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y prometheus
 
       - name: Run check
         run: pnpm run check

@@ -20,6 +20,17 @@ export function codexModelArgs(requestedModel: string): string[] {
   return ["--model", model];
 }
 
+export function codexLoginConfig(): string[] {
+  const method = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD?.trim().toLowerCase();
+  if (!method) return [];
+  if (method !== "api" && method !== "chatgpt") {
+    throw new Error(
+      "CLAWSWEEPER_CODEX_LOGIN_METHOD must be either api or chatgpt when configured.",
+    );
+  }
+  return [`forced_login_method=${JSON.stringify(method)}`];
+}
+
 export function redactInternalCodexModel(
   value: string | null | undefined,
   codexHome = process.env.CODEX_HOME?.trim() || join(homedir(), ".codex"),

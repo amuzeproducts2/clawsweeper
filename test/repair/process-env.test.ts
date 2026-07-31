@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { codexLoginConfig } from "../../dist/codex-env.js";
+
 import {
   clawsweeperGitIdentityEnv,
   clawsweeperGitUserName,
@@ -70,6 +72,21 @@ test("repair Codex config keeps repair workers on high fast", () => {
   assert.equal(repairCodexServiceTier(undefined), "fast");
   assert.equal(repairCodexServiceTier(""), "fast");
   assert.equal(repairCodexServiceTier("fast"), "fast");
+});
+
+test("Codex login method follows the installed Codex session unless explicitly pinned", () => {
+  withEnv({ CLAWSWEEPER_CODEX_LOGIN_METHOD: "" }, () => {
+    assert.deepEqual(codexLoginConfig(), []);
+  });
+  withEnv({ CLAWSWEEPER_CODEX_LOGIN_METHOD: "API" }, () => {
+    assert.deepEqual(codexLoginConfig(), ['forced_login_method="api"']);
+  });
+  withEnv({ CLAWSWEEPER_CODEX_LOGIN_METHOD: "chatgpt" }, () => {
+    assert.deepEqual(codexLoginConfig(), ['forced_login_method="chatgpt"']);
+  });
+  withEnv({ CLAWSWEEPER_CODEX_LOGIN_METHOD: "unsupported" }, () => {
+    assert.throws(() => codexLoginConfig(), /must be either api or chatgpt/);
+  });
 });
 
 function withEnv(values: Record<string, string>, callback: () => void) {

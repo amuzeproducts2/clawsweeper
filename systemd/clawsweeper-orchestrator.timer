@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Amuze ClawSweeper closed-loop orchestrator every 30 minutes
+
+[Timer]
+OnCalendar=*:0/30
+AccuracySec=30s
+Persistent=true
+Unit=clawsweeper-orchestrator.service
+
+[Install]
+WantedBy=timers.target

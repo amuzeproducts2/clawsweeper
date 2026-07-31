@@ -1,0 +1,83 @@
+name: Release bundle
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-pnpm
+      - name: Install Prometheus metric tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y prometheus
+      - name: Build and test
+        run: |
+          pnpm run check
+      - name: Build immutable release
+        run: scripts/build-release.sh "${RUNNER_TEMP}/clawsweeper-release"
+      - name: Read-only production-plan smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd "${RUNNER_TEMP}/clawsweeper-release"
+          node dist/clawsweeper.js plan \
+            --target-repo "${GITHUB_REPOSITORY}" \
+            --items-dir "${RUNNER_TEMP}/plan-smoke/items" \
+            --batch-size 1 \
+            --shard-count 1 \
+            --max-pages 1 \
+            --hot-intake > "${RUNNER_TEMP}/plan-smoke.json"
+          node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
+            "${RUNNER_TEMP}/plan-smoke.json"
+      - name: Reverify after smoke
+        run: "${RUNNER_TEMP}/clawsweeper-release/scripts/verify-release.sh ${RUNNER_TEMP}/clawsweeper-release"
+      - name: Package immutable transport archive
+        run: |
+          archive="clawsweeper-release-${GITHUB_SHA}.tgz"
+          tar -C "${RUNNER_TEMP}" -czf "${RUNNER_TEMP}/${archive}" \
+            clawsweeper-release
+          (
+            cd "${RUNNER_TEMP}"
+            sha256sum "${archive}" > "${archive}.sha256"
+          )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: clawsweeper-release-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/clawsweeper-release-${{ github.sha }}.tgz
+            ${{ runner.temp }}/clawsweeper-release-${{ github.sha }}.tgz.sha256
+          if-no-files-found: error
+
+  transport-smoke:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: clawsweeper-release-${{ github.sha }}
+          path: ${{ runner.temp }}/transport
+      - name: Verify transported archive and executable modes
+        run: |
+          cd "${RUNNER_TEMP}/transport"
+          sha256sum --check "clawsweeper-release-${GITHUB_SHA}.tgz.sha256"
+          install -d "${RUNNER_TEMP}/transported-release"
+          tar -C "${RUNNER_TEMP}/transported-release" -xzf \
+            "clawsweeper-release-${GITHUB_SHA}.tgz"
+          release="${RUNNER_TEMP}/transported-release/clawsweeper-release"
+          test -x "${release}/scripts/verify-release.sh"
+          test -x "${release}/scripts/smoke-release.mjs"
+          "${release}/scripts/verify-release.sh" "${release}"
