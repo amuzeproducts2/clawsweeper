@@ -97,7 +97,7 @@
     }
   },
   "target_inventory": {
-    "owners": ["openclaw", "steipete"],
+    "owners": ["openclaw", "steipete", "amuzeproducts2"],
     "deny_repositories": ["openclaw/clawsweeper-state", "openclaw/.github"],
     "include_private": false,
     "include_archived": false,
