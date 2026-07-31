@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -231,6 +232,14 @@ function atomicWrite(path, content) {
   ensureDir(dirname(path));
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, content, "utf8");
+  renameSync(temporary, path);
+}
+
+function writePrometheusTextfile(path, content) {
+  ensureDir(dirname(path));
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, content, "utf8");
+  chmodSync(temporary, 0o644);
   renameSync(temporary, path);
 }
 
@@ -1471,6 +1480,22 @@ function captureReviewState(repo, number, inspection, verdictOverride = null) {
     verdict,
   };
   writeReviewState(repo, number, state);
+  return state;
+}
+
+function completedFallbackReviewState(inspection, commentAction) {
+  if (!["posted", "patched"].includes(commentAction)) return null;
+  return {
+    status: "complete",
+    headSha: inspection.pr.headRefOid,
+    evidenceFingerprint: mergeSignalFingerprint(inspection),
+    verdict: "needs-human",
+  };
+}
+
+function captureCompletedFallbackReviewState(repo, number, inspection, commentAction) {
+  const state = completedFallbackReviewState(inspection, commentAction);
+  if (state) writeReviewState(repo, number, state);
   return state;
 }
 
@@ -3163,12 +3188,11 @@ function reviewItem({
   if (!codexEnabled) {
     const comment = deterministicFallbackComment(repo, number, "", inspection);
     const reviewedInspection = comment.action === "quiet" ? inspection : inspectPr(repo, number);
-    captureReviewState(
-      repo,
-      number,
-      reviewedInspection,
-      comment.action === "quiet" ? "quiet" : null,
-    );
+    if (comment.action === "quiet") {
+      captureReviewState(repo, number, reviewedInspection, "quiet");
+    } else {
+      captureCompletedFallbackReviewState(repo, number, reviewedInspection, comment.action);
+    }
     return {
       mode: comment.action === "quiet" ? "deterministic-quiet" : "deterministic-smart-fallback",
       copied: [],
@@ -3234,10 +3258,21 @@ function reviewItem({
   } catch (error) {
     const copied = existsSync(reviewDir) ? copyReviewArtifacts(reviewDir, itemsDir, repo) : [];
     const comment = deterministicFallbackComment(repo, number, error.message, inspection);
+    const fallbackState =
+      comment.action === "quiet"
+        ? null
+        : captureCompletedFallbackReviewState(
+            repo,
+            number,
+            inspectPr(repo, number),
+            comment.action,
+          );
     emitReceipt(
       `clawsweeper:${repo}#${number}`,
       "unexpected",
-      `Exact-head frontier review failed and remains retry eligible: ${error.message}`,
+      fallbackState
+        ? `Exact-head frontier review failed; deterministic needs-human fallback is quiescent until head or evidence changes: ${error.message}`
+        : `Exact-head frontier review failed and remains retry eligible: ${error.message}`,
       { failure_family: "frontier-review-failed", pr_number: number },
     );
     return {
@@ -3360,7 +3395,7 @@ function main() {
       if (healthcheckMetricsPath === metricsPath) {
         throw new Error("healthcheck metrics path must be separate from operational metrics");
       }
-      atomicWrite(
+      writePrometheusTextfile(
         healthcheckMetricsPath,
         renderHealthcheckMetrics({
           now,
@@ -3770,7 +3805,7 @@ function main() {
     reviewFailures,
   });
   if (metricsPath) {
-    atomicWrite(
+    writePrometheusTextfile(
       metricsPath,
       renderRunMetrics({
         now,
@@ -3829,6 +3864,7 @@ export {
   autoMergeMacroscopeLowRiskBlocker,
   autoRepairBlocker,
   buildAutoRepairPrompt,
+  completedFallbackReviewState,
   codexRepairEnv,
   deterministicFindings,
   diffNameOnly,
@@ -3870,6 +3906,7 @@ export {
   checkpointRunState,
   updateRunState,
   withinRunBudget,
+  writePrometheusTextfile,
   unchangedMergeStateResult,
   unresolvedOutdatedReviewThreads,
 };
