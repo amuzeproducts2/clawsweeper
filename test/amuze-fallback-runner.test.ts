@@ -182,7 +182,9 @@ case "\${command}" in
   start)
     [ -f "${systemdDir}/\${unit}" ]
     if [ "\${unit}" = clawsweeper-orchestrator.service ]; then
-      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\n' > "${healthcheckMetricsPath}"
+      exec 8>"${join(root, "shared.lock")}"
+      flock -n 8
+      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\nclawsweeper_healthcheck_release_info{revision="${version}"} 1\\n' > "${healthcheckMetricsPath}"
     fi
     ;;
   daemon-reload|disable|mask)
@@ -233,6 +235,11 @@ esac
   const systemctlLog = readFileSync(fakeSystemctlLog, "utf8");
   assert.match(systemctlLog, /enable --now clawsweeper-orchestrator\.timer/);
   assert.match(systemctlLog, /start clawsweeper-orchestrator\.service/);
+  assert.ok(
+    systemctlLog.indexOf("start clawsweeper-orchestrator.service") <
+      systemctlLog.indexOf("enable --now clawsweeper-orchestrator.timer"),
+    "the read-only smoke must finish before scheduled activation",
+  );
 
   writeFileSync(join(stateDir, "new-release-state"), "after\n");
   const rollback = new URL("../scripts/rollback-release.sh", import.meta.url);
