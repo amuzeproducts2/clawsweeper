@@ -1,0 +1,37 @@
+[Unit]
+Description=Amuze ClawSweeper closed-loop PR review, repair, and merge orchestrator
+Documentation=https://github.com/amuzeproducts2/clawsweeper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/.openclaw/releases/clawsweeper/current
+ExecStart=/usr/bin/bash /root/.openclaw/releases/clawsweeper/current/scripts/amuze-orchestrator.sh
+TimeoutStartSec=1800
+Nice=10
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateDevices=yes
+PrivateMounts=yes
+ProtectClock=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadOnlyPaths=/root/.openclaw/releases/clawsweeper /root/.openclaw/credentials /opt/clawsweeper-node-v24.18.0
+ReadWritePaths=/root/.openclaw/state/clawsweeper-orchestrator /var/lib/node_exporter/textfile_collector /var/lib/incidentd/spool /tmp

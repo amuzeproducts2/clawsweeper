@@ -38,6 +38,7 @@ jobs:
             schema
             scripts
             src
+            systemd
             test
             .oxfmtrc.json
             AGENTS.md
