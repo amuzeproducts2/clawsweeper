@@ -1167,8 +1167,8 @@ function withinRunBudget({ processed, actionItems, maxItems, maxActions, nowMs, 
 function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
   if (repairState.status === "pushed" && repairState.pushedSha === pr.headRefOid) return true;
   if (mergeState.headSha !== pr.headRefOid) return false;
-  if (mergeState.status === "failed") return true;
-  if (!["blocked", "started"].includes(mergeState.status)) return false;
+  if (["failed", "started"].includes(mergeState.status)) return true;
+  if (mergeState.status !== "blocked") return false;
   return /checks|Macroscope|agent approval|requested changes|changes requested|review decision|review thread|merge failed/i.test(
     mergeState.reason ?? "merge started",
   );
@@ -2741,7 +2741,17 @@ function latestReviewNotes(pr, reviewComments, reviewThreads = []) {
   const reviews = (pr.latestReviews ?? [])
     .filter((review) => review?.state && review.state !== "APPROVED")
     .slice(0, 5)
-    .map((review) => `- ${review.author?.login ?? "unknown"} state=${review.state}`);
+    .map((review) => {
+      const login = String(review.author?.login ?? "unknown");
+      const trusted =
+        configuredAgentReviewAuthors().has(login.toLowerCase()) || isMacroscopeBotLogin(login);
+      const body = trusted
+        ? String(review.body ?? "")
+            .replaceAll(/\s+/g, " ")
+            .slice(0, 500)
+        : "[untrusted review body omitted]";
+      return `- ${login} state=${review.state}: ${body}`.trim();
+    });
   void reviewComments;
   const threads = actionableReviewThreads(reviewThreads).map(
     (thread) => `- unresolved thread ${thread.id}: ${reviewThreadEvidence(thread)}`,

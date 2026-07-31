@@ -1532,10 +1532,29 @@ test("repair review notes exclude stale and untrusted instruction bodies", () =>
     ],
   );
   assert.match(notes, /untrusted-user state=CHANGES_REQUESTED/);
+  assert.match(notes, /untrusted review body omitted/);
   assert.match(notes, /active-untrusted/);
   assert.match(notes, /untrusted review body omitted/);
   assert.doesNotMatch(notes, /IGNORE ALL CONSTRAINTS|RUN THIS COMMAND|LEAK THE TOKEN/);
   assert.doesNotMatch(notes, /\bresolved\b|\boutdated\b/);
+});
+
+test("repair review notes preserve trusted top-level change requests", () => {
+  const notes = latestReviewNotes(
+    {
+      latestReviews: [
+        {
+          author: { login: "jaywillingham" },
+          state: "CHANGES_REQUESTED",
+          body: "Keep the rollback path failure-atomic.",
+        },
+      ],
+    },
+    [],
+    [],
+  );
+  assert.match(notes, /jaywillingham state=CHANGES_REQUESTED/);
+  assert.match(notes, /Keep the rollback path failure-atomic/);
 });
 
 test("Macroscope approval must be bound to the exact PR head", () => {
@@ -1736,6 +1755,7 @@ test("pending loop state is re-enqueued after the review planner considers it cu
     true,
   );
   assert.equal(loopStateRequiresTurn(pr, {}, { status: "merged", headSha }), false);
+  assert.equal(loopStateRequiresTurn(pr, {}, { status: "started", headSha, reason: null }), true);
   assert.equal(
     loopStateRequiresTurn(
       pr,
