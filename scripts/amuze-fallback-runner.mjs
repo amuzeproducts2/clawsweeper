@@ -3261,7 +3261,17 @@ function reviewItem({
       ],
       { timeoutMs: codexTimeoutMs + 30_000, env: targetEnv },
     );
-    const latestPullRequest = currentPullRequestIdentity(repo, number);
+    let latestPullRequest;
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch (error) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `Codex review completed but live pull-request state could not be rechecked: ${error.message}`,
+        status: "agent_review_failed",
+      };
+    }
     if (reviewWasSuperseded(inspection, latestPullRequest)) {
       return {
         mode: "codex-superseded",
@@ -3304,10 +3314,17 @@ function reviewItem({
       verdict: verdict ?? null,
     };
   } catch (error) {
-    let latestPullRequest = null;
+    let latestPullRequest;
     try {
       latestPullRequest = currentPullRequestIdentity(repo, number);
-    } catch {}
+    } catch (recheckError) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `${error.message}\nLive pull-request state recheck also failed: ${recheckError.message}`,
+        status: "agent_review_failed",
+      };
+    }
     if (reviewWasSuperseded(inspection, latestPullRequest)) {
       return {
         mode: "codex-superseded",

@@ -133,6 +133,7 @@ test("production review writes apply reports under the mutable artifact root", (
   );
   assert.match(reviewImplementation, /"--report-path",\s*join\(applyDir, "apply-report\.json"\)/);
   assert.match(reviewImplementation, /"--artifact-dir",\s*join\(applyDir, "artifacts"\)/);
+  assert.match(reviewImplementation, /mode: "codex-state-recheck-failed"/);
   assert.ok(
     reviewImplementation.indexOf("currentPullRequestIdentity(repo, number)") <
       reviewImplementation.indexOf("copyReviewArtifacts(reviewDir, itemsDir, repo)"),
