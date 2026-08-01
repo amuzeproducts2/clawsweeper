@@ -8,12 +8,25 @@ CODEX_BIN="${CLAWSWEEPER_CODEX_BIN:-/usr/bin/codex}"
 EXPECTED="CLAWSWEEPER_CODEX_RUNTIME_OK"
 OUTPUT_PATH="${STATE_DIR}/codex-runtime-smoke.txt"
 LOG_PATH="${STATE_DIR}/codex-runtime-smoke.log"
+FAILED_LOG_PATH="${STATE_DIR}/codex-runtime-smoke.failed.log"
 METRICS_TMP="${HEALTHCHECK_METRICS_PATH}.tmp.$$"
 
 cleanup() {
   rm -f "${OUTPUT_PATH}" "${LOG_PATH}" "${METRICS_TMP}"
 }
 trap cleanup EXIT
+
+preserve_failure_log() {
+  if [ -f "${LOG_PATH}" ]; then
+    chmod 0600 "${LOG_PATH}"
+    mv -f "${LOG_PATH}" "${FAILED_LOG_PATH}"
+  fi
+}
+
+response_is_exact() {
+  printf '%s' "${EXPECTED}" | cmp -s - "${OUTPUT_PATH}" ||
+    printf '%s\n' "${EXPECTED}" | cmp -s - "${OUTPUT_PATH}"
+}
 
 test -d "${RELEASE_ROOT}"
 install -d -m 0700 "${STATE_DIR}"
@@ -36,14 +49,18 @@ if ! env \
   --sandbox read-only \
   "Reply with exactly ${EXPECTED} and nothing else." \
   >"${LOG_PATH}" 2>&1; then
+  preserve_failure_log
   echo "Codex runtime smoke could not initialize a review session" >&2
   exit 1
 fi
 
-if [ ! -f "${OUTPUT_PATH}" ] || [ "$(tr -d '\r\n' < "${OUTPUT_PATH}")" != "${EXPECTED}" ]; then
+if [ ! -f "${OUTPUT_PATH}" ] || ! response_is_exact; then
+  preserve_failure_log
   echo "Codex runtime smoke returned an unexpected response" >&2
   exit 1
 fi
+
+rm -f "${FAILED_LOG_PATH}"
 
 test -f "${HEALTHCHECK_METRICS_PATH}"
 cat "${HEALTHCHECK_METRICS_PATH}" > "${METRICS_TMP}"

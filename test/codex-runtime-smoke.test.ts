@@ -7,7 +7,7 @@ import test from "node:test";
 
 const smokeScript = new URL("../scripts/codex-runtime-smoke.sh", import.meta.url);
 
-function fixture(mode: "ok" | "wrong" | "fail") {
+function fixture(mode: "ok" | "wrong" | "split" | "extra-lines" | "fail") {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-codex-runtime-smoke-"));
   const stateDir = join(root, "state");
   const metricsPath = join(root, "health.prom");
@@ -33,7 +33,9 @@ done
 case "${mode}" in
   ok) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output" ;;
   wrong) printf 'WRONG\n' > "$output" ;;
-  fail) exit 17 ;;
+  split) printf 'CLAWSWEEPER_CODEX_\nRUNTIME_OK\n' > "$output" ;;
+  extra-lines) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n\n' > "$output" ;;
+  fail) printf 'fake codex failure\n' >&2; exit 17 ;;
 esac
 `,
   );
@@ -62,7 +64,7 @@ test("Codex runtime smoke proves session execution without passing secret-bearin
   assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.txt")), false);
 });
 
-for (const mode of ["wrong", "fail"] as const) {
+for (const mode of ["wrong", "split", "extra-lines", "fail"] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
     const { fakeCodex, metricsPath, root, stateDir } = fixture(mode);
     const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
@@ -70,6 +72,8 @@ for (const mode of ["wrong", "fail"] as const) {
       env: { ...process.env, CLAWSWEEPER_CODEX_BIN: fakeCodex },
     });
     assert.notEqual(result.status, 0);
+    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.log")), false);
+    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.failed.log")), true);
     if (existsSync(metricsPath)) {
       assert.doesNotMatch(
         readFileSync(metricsPath, "utf8"),
