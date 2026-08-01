@@ -21,15 +21,20 @@ if [ -n "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${OPENAI_API_KEY:-}\${CODEX_API_KEY:-}
   exit 91
 fi
 output=""
+skip_git_check=0
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then
     output="$2"
     shift 2
     continue
   fi
+  if [ "$1" = "--skip-git-repo-check" ]; then
+    skip_git_check=1
+  fi
   shift
 done
 [ -n "$output" ]
+[ "$skip_git_check" -eq 1 ]
 case "${mode}" in
   ok) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output" ;;
   wrong) printf 'WRONG\n' > "$output" ;;
