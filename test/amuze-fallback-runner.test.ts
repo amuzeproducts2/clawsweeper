@@ -139,6 +139,19 @@ test("production review writes apply reports under the mutable artifact root", (
       reviewImplementation.indexOf("copyReviewArtifacts(reviewDir, itemsDir, repo)"),
     "the live pull-request state must be rechecked before durable review sync",
   );
+  assert.ok(
+    reviewImplementation.match(/currentPullRequestIdentity\(repo, number\)/g)?.length >= 4,
+    "both the successful and fallback review paths must recheck again at their mutation boundary",
+  );
+
+  const fallbackStart = runner.indexOf("function deterministicFallbackComment(");
+  const fallbackEnd = runner.indexOf("function autoRepairBlocker(", fallbackStart);
+  const fallbackImplementation = runner.slice(fallbackStart, fallbackEnd);
+  assert.ok(
+    fallbackImplementation.indexOf("currentPullRequestIdentity(repo, number)") <
+      fallbackImplementation.indexOf("if (existing?.id)"),
+    "fallback comments must recheck the exact PR head immediately before posting or patching",
+  );
 });
 
 test("the release wrapper is revision-relative and keeps mutable state external", () => {
