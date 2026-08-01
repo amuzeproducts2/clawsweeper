@@ -1692,7 +1692,7 @@ function inspectPr(repo, number) {
     "--repo",
     repo,
     "--json",
-    "title,url,author,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,files,commits,labels,isDraft,mergeable,reviewDecision,latestReviews",
+    "title,url,state,closed,mergedAt,author,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,files,commits,labels,isDraft,mergeable,reviewDecision,latestReviews",
   ]);
   const checks = runJsonBestEffort(
     "gh",
@@ -1728,6 +1728,26 @@ function inspectPr(repo, number) {
     reviewThreads,
     ...deterministicFindings(pr, checks, reviewThreads),
   };
+}
+
+function currentPullRequestIdentity(repo, number) {
+  return runJson("gh", [
+    "pr",
+    "view",
+    String(number),
+    "--repo",
+    repo,
+    "--json",
+    "state,headRefOid,mergedAt",
+  ]);
+}
+
+function reviewWasSuperseded(initialInspection, latestPullRequest) {
+  const initialHead = String(initialInspection?.pr?.headRefOid ?? "");
+  const latestHead = String(latestPullRequest?.headRefOid ?? "");
+  const latestState = String(latestPullRequest?.state ?? "").toUpperCase();
+  if (!initialHead || !latestHead || !latestState) return false;
+  return latestState !== "OPEN" || latestHead !== initialHead;
 }
 
 function dependencyBumpPath(path) {
@@ -3097,8 +3117,10 @@ function reviewItem({
   const itemsDir = join(artifactRoot, "records", slug, "items");
   const closedDir = join(artifactRoot, "records", slug, "closed");
   const reviewDir = join(artifactRoot, "reviews", slug);
+  const applyDir = join(artifactRoot, "apply", slug, String(number));
   ensureDir(reviewDir);
   ensureDir(itemsDir);
+  ensureDir(applyDir);
   const common = ["--target-repo", repo, "--items-dir", itemsDir, "--item-number", String(number)];
   const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   const inspection = inspectPr(repo, number);
@@ -3239,6 +3261,16 @@ function reviewItem({
       ],
       { timeoutMs: codexTimeoutMs + 30_000, env: targetEnv },
     );
+    const latestPullRequest = currentPullRequestIdentity(repo, number);
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
     const copied = copyReviewArtifacts(reviewDir, itemsDir, repo);
     run(
       "node",
@@ -3255,6 +3287,10 @@ function reviewItem({
         "1",
         "--limit",
         "0",
+        "--report-path",
+        join(applyDir, "apply-report.json"),
+        "--artifact-dir",
+        join(applyDir, "artifacts"),
       ],
       { env: targetEnv },
     );
@@ -3268,6 +3304,20 @@ function reviewItem({
       verdict: verdict ?? null,
     };
   } catch (error) {
+    let latestPullRequest = null;
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch {}
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        error: error.message,
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
     const copied = existsSync(reviewDir) ? copyReviewArtifacts(reviewDir, itemsDir, repo) : [];
     const comment = deterministicFallbackComment(repo, number, error.message, inspection);
     const fallbackState =
@@ -3901,6 +3951,7 @@ export {
   readReviewStateFile,
   readReviewState,
   repairStateTracksHead,
+  reviewWasSuperseded,
   reviewStateIsCurrent,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
