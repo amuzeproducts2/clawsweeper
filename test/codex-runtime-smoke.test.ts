@@ -64,6 +64,53 @@ test("Codex runtime smoke proves session execution without passing secret-bearin
   assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.txt")), false);
 });
 
+test("Codex runtime smoke replaces its metric families on repeated success", () => {
+  const { fakeCodex, metricsPath, root, stateDir } = fixture("ok");
+  writeFileSync(
+    metricsPath,
+    `clawsweeper_healthcheck_success 1
+# HELP clawsweeper_healthcheck_codex_runtime_success stale help
+# TYPE clawsweeper_healthcheck_codex_runtime_success gauge
+clawsweeper_healthcheck_codex_runtime_success 0
+# HELP clawsweeper_healthcheck_codex_runtime_timestamp_seconds stale help
+# TYPE clawsweeper_healthcheck_codex_runtime_timestamp_seconds gauge
+clawsweeper_healthcheck_codex_runtime_timestamp_seconds 100
+`,
+  );
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
+      encoding: "utf8",
+      env: { ...process.env, CLAWSWEEPER_CODEX_BIN: fakeCodex },
+    });
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  }
+
+  const metrics = readFileSync(metricsPath, "utf8");
+  assert.match(metrics, /^clawsweeper_healthcheck_success 1$/m);
+  for (const family of [
+    "clawsweeper_healthcheck_codex_runtime_success",
+    "clawsweeper_healthcheck_codex_runtime_timestamp_seconds",
+  ]) {
+    assert.equal(
+      metrics.match(new RegExp(`^# HELP ${family} `, "gm"))?.length,
+      1,
+      `${family} must have one HELP line`,
+    );
+    assert.equal(
+      metrics.match(new RegExp(`^# TYPE ${family} `, "gm"))?.length,
+      1,
+      `${family} must have one TYPE line`,
+    );
+    assert.equal(
+      metrics.match(new RegExp(`^${family} `, "gm"))?.length,
+      1,
+      `${family} must have one sample`,
+    );
+  }
+  assert.match(metrics, /^clawsweeper_healthcheck_codex_runtime_success 1$/m);
+});
+
 for (const mode of ["wrong", "split", "extra-lines", "fail"] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
     const { fakeCodex, metricsPath, root, stateDir } = fixture(mode);

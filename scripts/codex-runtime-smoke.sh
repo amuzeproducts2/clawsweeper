@@ -63,7 +63,14 @@ fi
 rm -f "${FAILED_LOG_PATH}"
 
 test -f "${HEALTHCHECK_METRICS_PATH}"
-cat "${HEALTHCHECK_METRICS_PATH}" > "${METRICS_TMP}"
+awk '
+  $1 == "#" && ($2 == "HELP" || $2 == "TYPE") &&
+    ($3 == "clawsweeper_healthcheck_codex_runtime_success" ||
+     $3 == "clawsweeper_healthcheck_codex_runtime_timestamp_seconds") { next }
+  $1 == "clawsweeper_healthcheck_codex_runtime_success" ||
+    $1 == "clawsweeper_healthcheck_codex_runtime_timestamp_seconds" { next }
+  { print }
+' "${HEALTHCHECK_METRICS_PATH}" > "${METRICS_TMP}"
 cat >> "${METRICS_TMP}" <<EOF
 # HELP clawsweeper_healthcheck_codex_runtime_success 1 when the install smoke created a Codex session in the production sandbox.
 # TYPE clawsweeper_healthcheck_codex_runtime_success gauge
