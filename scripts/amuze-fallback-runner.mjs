@@ -1692,7 +1692,7 @@ function inspectPr(repo, number) {
     "--repo",
     repo,
     "--json",
-    "title,url,author,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,files,commits,labels,isDraft,mergeable,reviewDecision,latestReviews",
+    "title,url,state,closed,mergedAt,author,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,files,commits,labels,isDraft,mergeable,reviewDecision,latestReviews",
   ]);
   const checks = runJsonBestEffort(
     "gh",
@@ -1728,6 +1728,26 @@ function inspectPr(repo, number) {
     reviewThreads,
     ...deterministicFindings(pr, checks, reviewThreads),
   };
+}
+
+function currentPullRequestIdentity(repo, number) {
+  return runJson("gh", [
+    "pr",
+    "view",
+    String(number),
+    "--repo",
+    repo,
+    "--json",
+    "state,headRefOid,mergedAt",
+  ]);
+}
+
+function reviewWasSuperseded(initialInspection, latestPullRequest) {
+  const initialHead = String(initialInspection?.pr?.headRefOid ?? "");
+  const latestHead = String(latestPullRequest?.headRefOid ?? "");
+  const latestState = String(latestPullRequest?.state ?? "").toUpperCase();
+  if (!initialHead || !latestHead || !latestState) return false;
+  return latestState !== "OPEN" || latestHead !== initialHead;
 }
 
 function dependencyBumpPath(path) {
@@ -2689,6 +2709,24 @@ function deterministicFallbackComment(repo, number, errorMessage = "", inspectio
   const comments = issueComments(repo, number);
   const existing = patchableComment(comments, number);
   const payload = commentPayloadPath(repo, number, body);
+  let mutationPullRequest;
+  try {
+    mutationPullRequest = currentPullRequestIdentity(repo, number);
+  } catch (error) {
+    return {
+      action: "state_recheck_failed",
+      headSha: pr.headRefOid ?? null,
+      reason: `Live pull-request state could not be rechecked at the comment mutation boundary: ${error.message}`,
+    };
+  }
+  if (reviewWasSuperseded({ pr }, mutationPullRequest)) {
+    return {
+      action: "superseded",
+      headSha: mutationPullRequest.headRefOid ?? null,
+      state: mutationPullRequest.state ?? null,
+      reason: "Pull request closed or advanced before the fallback comment mutation",
+    };
+  }
   if (existing?.id) {
     run("gh", [
       "api",
@@ -3097,8 +3135,10 @@ function reviewItem({
   const itemsDir = join(artifactRoot, "records", slug, "items");
   const closedDir = join(artifactRoot, "records", slug, "closed");
   const reviewDir = join(artifactRoot, "reviews", slug);
+  const applyDir = join(artifactRoot, "apply", slug, String(number));
   ensureDir(reviewDir);
   ensureDir(itemsDir);
+  ensureDir(applyDir);
   const common = ["--target-repo", repo, "--items-dir", itemsDir, "--item-number", String(number)];
   const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   const inspection = inspectPr(repo, number);
@@ -3199,6 +3239,23 @@ function reviewItem({
   }
   if (!codexEnabled) {
     const comment = deterministicFallbackComment(repo, number, "", inspection);
+    if (comment.action === "superseded") {
+      return {
+        mode: "deterministic-superseded",
+        copied: [],
+        comment,
+        status: "agent_review_superseded",
+      };
+    }
+    if (comment.action === "state_recheck_failed") {
+      return {
+        mode: "deterministic-state-recheck-failed",
+        copied: [],
+        comment,
+        error: comment.reason,
+        status: "agent_review_failed",
+      };
+    }
     const reviewedInspection = comment.action === "quiet" ? inspection : inspectPr(repo, number);
     if (comment.action === "quiet") {
       captureReviewState(repo, number, reviewedInspection, "quiet");
@@ -3239,6 +3296,45 @@ function reviewItem({
       ],
       { timeoutMs: codexTimeoutMs + 30_000, env: targetEnv },
     );
+    let latestPullRequest;
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch (error) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `Codex review completed but live pull-request state could not be rechecked: ${error.message}`,
+        status: "agent_review_failed",
+      };
+    }
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch (error) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `Codex review completed but live pull-request state could not be rechecked at the mutation boundary: ${error.message}`,
+        status: "agent_review_failed",
+      };
+    }
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
     const copied = copyReviewArtifacts(reviewDir, itemsDir, repo);
     run(
       "node",
@@ -3255,6 +3351,10 @@ function reviewItem({
         "1",
         "--limit",
         "0",
+        "--report-path",
+        join(applyDir, "apply-report.json"),
+        "--artifact-dir",
+        join(applyDir, "artifacts"),
       ],
       { env: targetEnv },
     );
@@ -3268,8 +3368,69 @@ function reviewItem({
       verdict: verdict ?? null,
     };
   } catch (error) {
+    let latestPullRequest;
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch (recheckError) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `${error.message}\nLive pull-request state recheck also failed: ${recheckError.message}`,
+        status: "agent_review_failed",
+      };
+    }
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        error: error.message,
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
+    try {
+      latestPullRequest = currentPullRequestIdentity(repo, number);
+    } catch (recheckError) {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied: [],
+        error: `${error.message}\nLive pull-request state could not be rechecked at the fallback mutation boundary: ${recheckError.message}`,
+        status: "agent_review_failed",
+      };
+    }
+    if (reviewWasSuperseded(inspection, latestPullRequest)) {
+      return {
+        mode: "codex-superseded",
+        copied: [],
+        error: error.message,
+        status: "agent_review_superseded",
+        state: latestPullRequest.state,
+        headSha: latestPullRequest.headRefOid,
+      };
+    }
     const copied = existsSync(reviewDir) ? copyReviewArtifacts(reviewDir, itemsDir, repo) : [];
     const comment = deterministicFallbackComment(repo, number, error.message, inspection);
+    if (comment.action === "superseded") {
+      return {
+        mode: "codex-superseded",
+        copied,
+        comment,
+        error: error.message,
+        status: "agent_review_superseded",
+        state: comment.state,
+        headSha: comment.headSha,
+      };
+    }
+    if (comment.action === "state_recheck_failed") {
+      return {
+        mode: "codex-state-recheck-failed",
+        copied,
+        comment,
+        error: `${error.message}\n${comment.reason}`,
+        status: "agent_review_failed",
+      };
+    }
     const fallbackState =
       comment.action === "quiet"
         ? null
@@ -3901,6 +4062,7 @@ export {
   readReviewStateFile,
   readReviewState,
   repairStateTracksHead,
+  reviewWasSuperseded,
   reviewStateIsCurrent,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,

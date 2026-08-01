@@ -53,6 +53,7 @@ import {
   reconcileSecurityObservation,
   readReviewStateFile,
   repairStateTracksHead,
+  reviewWasSuperseded,
   runOutcomeSuccess,
   securityAlertPriorityRepos,
   securityOwnership,
@@ -107,6 +108,49 @@ test("a completed deterministic fallback quiesces the unchanged head and evidenc
     ),
     null,
     "a fallback comment for the prior head cannot complete an advanced head",
+  );
+});
+
+test("a review failure is superseded when the pull request closes or its head moves", () => {
+  const initial = { pr: { state: "OPEN", headRefOid: headSha } };
+  assert.equal(reviewWasSuperseded(initial, { state: "MERGED", headRefOid: headSha }), true);
+  assert.equal(reviewWasSuperseded(initial, { state: "OPEN", headRefOid: "advanced-head" }), true);
+  assert.equal(reviewWasSuperseded(initial, { state: "OPEN", headRefOid: headSha }), false);
+  assert.equal(reviewWasSuperseded(initial, null), false);
+});
+
+test("production review writes apply reports under the mutable artifact root", () => {
+  const runner = readFileSync(
+    new URL("../scripts/amuze-fallback-runner.mjs", import.meta.url),
+    "utf8",
+  );
+  const reviewStart = runner.indexOf("function reviewItem(");
+  const reviewEnd = runner.indexOf("function statusMakesProgress(", reviewStart);
+  const reviewImplementation = runner.slice(reviewStart, reviewEnd);
+  assert.match(
+    reviewImplementation,
+    /const applyDir = join\(artifactRoot, "apply", slug, String\(number\)\)/,
+  );
+  assert.match(reviewImplementation, /"--report-path",\s*join\(applyDir, "apply-report\.json"\)/);
+  assert.match(reviewImplementation, /"--artifact-dir",\s*join\(applyDir, "artifacts"\)/);
+  assert.match(reviewImplementation, /mode: "codex-state-recheck-failed"/);
+  assert.ok(
+    reviewImplementation.indexOf("currentPullRequestIdentity(repo, number)") <
+      reviewImplementation.indexOf("copyReviewArtifacts(reviewDir, itemsDir, repo)"),
+    "the live pull-request state must be rechecked before durable review sync",
+  );
+  assert.ok(
+    reviewImplementation.match(/currentPullRequestIdentity\(repo, number\)/g)?.length >= 4,
+    "both the successful and fallback review paths must recheck again at their mutation boundary",
+  );
+
+  const fallbackStart = runner.indexOf("function deterministicFallbackComment(");
+  const fallbackEnd = runner.indexOf("function autoRepairBlocker(", fallbackStart);
+  const fallbackImplementation = runner.slice(fallbackStart, fallbackEnd);
+  assert.ok(
+    fallbackImplementation.indexOf("currentPullRequestIdentity(repo, number)") <
+      fallbackImplementation.indexOf("if (existing?.id)"),
+    "fallback comments must recheck the exact PR head immediately before posting or patching",
   );
 });
 
