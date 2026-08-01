@@ -219,6 +219,8 @@ process.exit(2);
       "hot-intake",
       "--limit",
       "2",
+      "--owners",
+      "openclaw,steipete",
       "--cursor-path",
       cursorPath,
       "--repo",

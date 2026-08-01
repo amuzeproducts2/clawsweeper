@@ -34,4 +34,4 @@ LockPersonality=yes
 RestrictRealtime=yes
 SystemCallArchitectures=native
 ReadOnlyPaths=/root/.openclaw/releases/clawsweeper /root/.openclaw/credentials /opt/clawsweeper-node-v24.18.0
-ReadWritePaths=/root/.openclaw/state/clawsweeper-orchestrator /var/lib/node_exporter/textfile_collector /var/lib/incidentd/spool /tmp
+ReadWritePaths=/root/.codex /root/.openclaw/state/clawsweeper-orchestrator /var/lib/node_exporter/textfile_collector /var/lib/incidentd/spool /tmp

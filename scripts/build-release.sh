@@ -30,6 +30,7 @@ cp -a "${ROOT}/schema/." "${OUTPUT_DIR}/schema/"
 install -m 0644 "${ROOT}/scripts/amuze-fallback-runner.mjs" "${OUTPUT_DIR}/scripts/"
 install -m 0755 \
   "${ROOT}/scripts/amuze-orchestrator.sh" \
+  "${ROOT}/scripts/codex-runtime-smoke.sh" \
   "${ROOT}/scripts/install-release.sh" \
   "${ROOT}/scripts/rollback-evidence.sh" \
   "${ROOT}/scripts/rollback-release.sh" \
