@@ -44,6 +44,7 @@ if ! env \
   -u CLAWSWEEPER_INTERNAL_MODEL \
   "${CODEX_BIN}" exec \
   -c 'approval_policy="never"' \
+  --skip-git-repo-check \
   -C "${RELEASE_ROOT}" \
   --output-last-message "${OUTPUT_PATH}" \
   --sandbox read-only \
