@@ -9,6 +9,7 @@ import {
   readFileSync,
   readlinkSync,
   readdirSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -44,6 +45,7 @@ import {
   orderedRepositories,
   paginatedRestItems,
   renderRunMetrics,
+  completedFallbackReviewState,
   reviewStateIsCurrent,
   reviewThreadsFromGraphql,
   reviewThreadsPageFromGraphql,
@@ -61,9 +63,52 @@ import {
   unchangedMergeStateResult,
   unresolvedOutdatedReviewThreads,
   withinRunBudget,
+  writePrometheusTextfile,
 } from "../scripts/amuze-fallback-runner.mjs";
 
 const headSha = "abc123def456";
+
+test("Prometheus textfiles remain readable under the production-restrictive umask", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-metrics-mode-test-"));
+  const path = join(root, "clawsweeper.prom");
+  const previousUmask = process.umask(0o077);
+  try {
+    writePrometheusTextfile(path, "clawsweeper_test_metric 1\n");
+  } finally {
+    process.umask(previousUmask);
+  }
+  assert.equal(statSync(path).mode & 0o777, 0o644);
+});
+
+test("a completed deterministic fallback quiesces the unchanged head and evidence", () => {
+  const inspection = {
+    pr: {
+      headRefOid: headSha,
+      reviewDecision: "CHANGES_REQUESTED",
+      latestReviews: [],
+    },
+    checks: [],
+    reviewThreads: [],
+    conversationComments: [],
+  };
+  const state = completedFallbackReviewState(inspection, {
+    action: "posted",
+    headSha,
+  });
+  assert.equal(state.verdict, "needs-human");
+  assert.equal(reviewStateIsCurrent(state, inspection), true);
+  assert.equal(
+    completedFallbackReviewState(
+      {
+        ...inspection,
+        pr: { ...inspection.pr, headRefOid: "advanced-head" },
+      },
+      { action: "posted", headSha },
+    ),
+    null,
+    "a fallback comment for the prior head cannot complete an advanced head",
+  );
+});
 
 test("the release wrapper is revision-relative and keeps mutable state external", () => {
   const wrapper = readFileSync(

@@ -2,6 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -231,6 +232,14 @@ function atomicWrite(path, content) {
   ensureDir(dirname(path));
   const temporary = `${path}.${process.pid}.tmp`;
   writeFileSync(temporary, content, "utf8");
+  renameSync(temporary, path);
+}
+
+function writePrometheusTextfile(path, content) {
+  ensureDir(dirname(path));
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, content, "utf8");
+  chmodSync(temporary, 0o644);
   renameSync(temporary, path);
 }
 
@@ -1474,6 +1483,23 @@ function captureReviewState(repo, number, inspection, verdictOverride = null) {
   return state;
 }
 
+function completedFallbackReviewState(inspection, comment) {
+  if (!["posted", "patched"].includes(comment?.action)) return null;
+  if (!comment?.headSha || comment.headSha !== inspection?.pr?.headRefOid) return null;
+  return {
+    status: "complete",
+    headSha: comment.headSha,
+    evidenceFingerprint: mergeSignalFingerprint(inspection),
+    verdict: "needs-human",
+  };
+}
+
+function captureCompletedFallbackReviewState(repo, number, inspection, comment) {
+  const state = completedFallbackReviewState(inspection, comment);
+  if (state) writeReviewState(repo, number, state);
+  return state;
+}
+
 function formatCheckSummary(checks) {
   if (!checks.length) return "No check runs are visible yet.";
   const counts = checks.reduce((acc, check) => {
@@ -2596,6 +2622,7 @@ function deterministicFallbackComment(repo, number, errorMessage = "", inspectio
   if (findings.length === 0) {
     return {
       action: "quiet",
+      headSha: pr.headRefOid ?? null,
       reason: errorMessage
         ? "model_review_failed_no_deterministic_findings"
         : "no_deterministic_findings",
@@ -2671,7 +2698,12 @@ function deterministicFallbackComment(repo, number, errorMessage = "", inspectio
       "--input",
       payload,
     ]);
-    return { action: "patched", commentId: existing.id, url: existing.html_url };
+    return {
+      action: "patched",
+      commentId: existing.id,
+      url: existing.html_url,
+      headSha: pr.headRefOid ?? null,
+    };
   }
   const created = runJson("gh", [
     "api",
@@ -2681,7 +2713,12 @@ function deterministicFallbackComment(repo, number, errorMessage = "", inspectio
     "--input",
     payload,
   ]);
-  return { action: "posted", commentId: created.id, url: created.html_url };
+  return {
+    action: "posted",
+    commentId: created.id,
+    url: created.html_url,
+    headSha: pr.headRefOid ?? null,
+  };
 }
 
 function autoRepairBlocker(repo, pr, checks, findings, stats, reviewThreads = []) {
@@ -3163,12 +3200,11 @@ function reviewItem({
   if (!codexEnabled) {
     const comment = deterministicFallbackComment(repo, number, "", inspection);
     const reviewedInspection = comment.action === "quiet" ? inspection : inspectPr(repo, number);
-    captureReviewState(
-      repo,
-      number,
-      reviewedInspection,
-      comment.action === "quiet" ? "quiet" : null,
-    );
+    if (comment.action === "quiet") {
+      captureReviewState(repo, number, reviewedInspection, "quiet");
+    } else {
+      captureCompletedFallbackReviewState(repo, number, reviewedInspection, comment);
+    }
     return {
       mode: comment.action === "quiet" ? "deterministic-quiet" : "deterministic-smart-fallback",
       copied: [],
@@ -3234,10 +3270,16 @@ function reviewItem({
   } catch (error) {
     const copied = existsSync(reviewDir) ? copyReviewArtifacts(reviewDir, itemsDir, repo) : [];
     const comment = deterministicFallbackComment(repo, number, error.message, inspection);
+    const fallbackState =
+      comment.action === "quiet"
+        ? null
+        : captureCompletedFallbackReviewState(repo, number, inspectPr(repo, number), comment);
     emitReceipt(
       `clawsweeper:${repo}#${number}`,
       "unexpected",
-      `Exact-head frontier review failed and remains retry eligible: ${error.message}`,
+      fallbackState
+        ? `Exact-head frontier review failed; deterministic needs-human fallback is quiescent until head or evidence changes: ${error.message}`
+        : `Exact-head frontier review failed and remains retry eligible: ${error.message}`,
       { failure_family: "frontier-review-failed", pr_number: number },
     );
     return {
@@ -3360,7 +3402,7 @@ function main() {
       if (healthcheckMetricsPath === metricsPath) {
         throw new Error("healthcheck metrics path must be separate from operational metrics");
       }
-      atomicWrite(
+      writePrometheusTextfile(
         healthcheckMetricsPath,
         renderHealthcheckMetrics({
           now,
@@ -3770,7 +3812,7 @@ function main() {
     reviewFailures,
   });
   if (metricsPath) {
-    atomicWrite(
+    writePrometheusTextfile(
       metricsPath,
       renderRunMetrics({
         now,
@@ -3829,6 +3871,7 @@ export {
   autoMergeMacroscopeLowRiskBlocker,
   autoRepairBlocker,
   buildAutoRepairPrompt,
+  completedFallbackReviewState,
   codexRepairEnv,
   deterministicFindings,
   diffNameOnly,
@@ -3870,6 +3913,7 @@ export {
   checkpointRunState,
   updateRunState,
   withinRunBudget,
+  writePrometheusTextfile,
   unchangedMergeStateResult,
   unresolvedOutdatedReviewThreads,
 };

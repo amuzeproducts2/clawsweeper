@@ -1013,6 +1013,12 @@ interface AuditResult {
 }
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+export function runtimeArtifactRoot(
+  environment: Partial<Pick<NodeJS.ProcessEnv, "CLAWSWEEPER_ARTIFACT_ROOT">> = process.env,
+): string {
+  return resolve(environment.CLAWSWEEPER_ARTIFACT_ROOT || join(ROOT, ".artifacts"));
+}
 const REPORT_REPO = "openclaw/clawsweeper";
 const RECORDS_ROOT = join(ROOT, "records");
 let activeRepositoryProfile = repositoryProfileFor(
@@ -14106,10 +14112,10 @@ function updateReviewCommentMetadata(
 }
 
 function writeCommentPayload(number: number, body: string): string {
-  const commentFile = join(ROOT, ".artifacts", `comment-${number}.md`);
+  const commentFile = join(runtimeArtifactRoot(), `comment-${number}.md`);
   ensureDir(dirname(commentFile));
   writeFileSync(commentFile, body, "utf8");
-  const commentPayloadFile = join(ROOT, ".artifacts", `comment-${number}.json`);
+  const commentPayloadFile = join(runtimeArtifactRoot(), `comment-${number}.json`);
   writeFileSync(commentPayloadFile, JSON.stringify({ body }), "utf8");
   return commentPayloadFile;
 }
@@ -14263,7 +14269,8 @@ function closeItem(options: { number: number; kind: ItemKind; reason: CloseReaso
     ghWithRetry(["pr", "close", String(options.number)]);
   } else {
     const reason = isImplementationCloseReason(options.reason) ? "completed" : "not_planned";
-    const closePayloadFile = join(ROOT, ".artifacts", `close-${options.number}.json`);
+    const closePayloadFile = join(runtimeArtifactRoot(), `close-${options.number}.json`);
+    ensureDir(dirname(closePayloadFile));
     writeFileSync(
       closePayloadFile,
       JSON.stringify({ state: "closed", state_reason: reason }),
@@ -18488,7 +18495,7 @@ function assistCommand(args: Args): void {
   const reasoningEffort = stringArg(args.codex_reasoning_effort, "low");
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const timeoutMs = numberArg(args.codex_timeout_ms, 120_000);
-  const workDir = resolve(stringArg(args.work_dir, join(ROOT, ".artifacts", "assist-codex")));
+  const workDir = resolve(stringArg(args.work_dir, join(runtimeArtifactRoot(), "assist-codex")));
   const sourceCommentId = stringArg(args.comment_id, "");
   const sourceCommentUrl = stringArg(args.comment_url, "");
   const author = stringArg(args.author, "");
