@@ -18464,3 +18464,36 @@ test("safeOutputTail tolerates missing process output", () => {
   assert.equal(safeOutputTail(null), "");
   assert.equal(safeOutputTail("abcdef", 3), "def");
 });
+
+test("scheduled workflow jobs fail closed on forks without an explicit opt-in", () => {
+  const workflow = readFileSync(".github/workflows/sweep.yml", "utf8");
+  const scheduleGuard =
+    "github.event_name != 'schedule' || github.repository == 'openclaw/clawsweeper' || vars.CLAWSWEEPER_ENABLE_SCHEDULES == '1'";
+
+  const skipJobStart = workflow.indexOf("\n  fork-schedule-disabled:");
+  const nextJobStart = workflow.indexOf("\n  event-disabled-target:", skipJobStart);
+  assert.notEqual(skipJobStart, -1);
+  assert.notEqual(nextJobStart, -1);
+  const skipJob = workflow.slice(skipJobStart, nextJobStart);
+  assert.match(skipJob, /name: Skip unconfigured fork schedule/);
+  assert.match(skipJob, /github\.event_name == 'schedule'/);
+  assert.match(skipJob, /github\.repository != 'openclaw\/clawsweeper'/);
+  assert.match(skipJob, /vars\.CLAWSWEEPER_ENABLE_SCHEDULES != '1'/);
+
+  for (const jobName of [
+    "target-fanout",
+    "plan",
+    "retry-failed-reviews",
+    "audit-dashboard",
+    "apply-existing",
+  ]) {
+    const jobStart = workflow.indexOf(`\n  ${jobName}:`);
+    const runsOn = workflow.indexOf("\n    runs-on:", jobStart);
+    assert.notEqual(jobStart, -1, `${jobName} job exists`);
+    assert.notEqual(runsOn, -1, `${jobName} job has a runs-on boundary`);
+    assert.match(
+      workflow.slice(jobStart, runsOn),
+      new RegExp(scheduleGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+    );
+  }
+});
