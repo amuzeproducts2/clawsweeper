@@ -120,6 +120,7 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(wrapper, /MAX_ITEMS:-10/);
   assert.match(wrapper, /MAX_ITEMS_PER_REPO:-1/);
   assert.match(wrapper, /CLAWSWEEPER_RELEASE_REVISION/);
+  assert.match(wrapper, /CODEX_HOME="\/root\/\.codex"/);
   assert.match(wrapper, /verify-release\.sh/);
   assert.match(wrapper, /dist\/clawsweeper\.js/);
   assert.match(wrapper, /MAX_ACTIONS:-2/);
@@ -127,6 +128,7 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(wrapper, /PLAN_LOOKAHEAD:-20/);
   assert.match(wrapper, /\.install-smoke/);
   assert.match(wrapper, /--healthcheck/);
+  assert.match(wrapper, /codex-runtime-smoke\.sh/);
   assert.doesNotMatch(wrapper, /clawsweeper-prod-3ddf8d50/);
   assert.doesNotMatch(wrapper, /set -x/);
   const service = readFileSync(
@@ -138,14 +140,19 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(service, /ProtectSystem=strict/);
   assert.match(service, /CapabilityBoundingSet=\n/);
   assert.match(service, /ProtectHome=read-only/);
+  assert.match(service, /ReadWritePaths=.*\/root\/\.codex/);
   assert.match(service, /PrivateDevices=yes/);
   assert.match(service, /UMask=0077/);
   const builder = readFileSync(new URL("../scripts/build-release.sh", import.meta.url), "utf8");
+  assert.match(builder, /codex-runtime-smoke\.sh/);
   for (const directory of ["config", "prompts", "schema"]) {
     assert.match(builder, new RegExp(`\\$\\{ROOT\\}/${directory}/\\.`));
   }
   const verifier = readFileSync(new URL("../scripts/verify-release.sh", import.meta.url), "utf8");
   assert.match(verifier, /smoke-release\.mjs/);
+  assert.match(verifier, /codex-runtime-smoke\.sh/);
+  const installer = readFileSync(new URL("../scripts/install-release.sh", import.meta.url), "utf8");
+  assert.match(installer, /clawsweeper_healthcheck_codex_runtime_success/);
   const releaseWorkflow = readFileSync(
     new URL("../.github/workflows/release-bundle.yml", import.meta.url),
     "utf8",
@@ -229,7 +236,7 @@ case "\${command}" in
     if [ "\${unit}" = clawsweeper-orchestrator.service ]; then
       exec 8>"${join(root, "shared.lock")}"
       flock -n 8
-      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\nclawsweeper_healthcheck_release_info{revision="${version}"} 1\\n' > "${healthcheckMetricsPath}"
+      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\nclawsweeper_healthcheck_codex_runtime_success 1\\nclawsweeper_healthcheck_codex_runtime_timestamp_seconds 100\\nclawsweeper_healthcheck_release_info{revision="${version}"} 1\\n' > "${healthcheckMetricsPath}"
     fi
     ;;
   daemon-reload|disable|mask)

@@ -28,6 +28,7 @@ fi
 test -s "${RELEASE_DIR}/dist/clawsweeper.js"
 test -s "${RELEASE_DIR}/scripts/amuze-fallback-runner.mjs"
 test -x "${RELEASE_DIR}/scripts/amuze-orchestrator.sh"
+test -x "${RELEASE_DIR}/scripts/codex-runtime-smoke.sh"
 test -x "${RELEASE_DIR}/scripts/install-release.sh"
 test -x "${RELEASE_DIR}/scripts/rollback-evidence.sh"
 test -x "${RELEASE_DIR}/scripts/rollback-release.sh"

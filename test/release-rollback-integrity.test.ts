@@ -125,7 +125,7 @@ case "\${command}" in
     ;;
   start)
     if [ "\${unit}" = "${serviceUnit}" ]; then
-      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\nclawsweeper_healthcheck_release_info{revision="${version}"} 1\\n' > "${healthcheckMetricsPath}"
+      printf 'clawsweeper_healthcheck_last_run_timestamp_seconds 100\\nclawsweeper_healthcheck_success 1\\nclawsweeper_healthcheck_codex_runtime_success 1\\nclawsweeper_healthcheck_codex_runtime_timestamp_seconds 100\\nclawsweeper_healthcheck_release_info{revision="${version}"} 1\\n' > "${healthcheckMetricsPath}"
     elif [ "\${unit}" = "${timerUnit}" ]; then
       printf 'active\\n' > "\${state}/active"
     fi

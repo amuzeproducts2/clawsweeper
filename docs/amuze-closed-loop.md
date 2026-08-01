@@ -76,7 +76,11 @@ by `owner/repo#alert-number`.
 
 The release wrapper keeps mutable state under
 `/root/.openclaw/state/clawsweeper-orchestrator` and runs code through
-`/root/.openclaw/releases/clawsweeper/current`.
+`/root/.openclaw/releases/clawsweeper/current`. The service retains
+`ProtectHome=read-only`; the existing authenticated Codex home at
+`/root/.codex` is the only writable home subtree so Codex can update its model
+cache and create review sessions without making reviewed repositories or the
+credential tree writable.
 
 The operational node_exporter textfile reports the exact release revision, last completion,
 repository/item counts, action count, progress, unchanged skips, no-progress
@@ -125,12 +129,15 @@ or release-symlink mutation. A static release-script regression also rejects
 any non-comment physical line that ends with a string or numeric comparison
 operator, independent of whether the predicate uses `[`, `test`, an absolute
 test path, or a command wrapper. This prevents conditional-command error
-suppression from masking a split comparison failure. The install smoke uses a
-marker-driven read-only healthcheck: it
-verifies GitHub API access, snapshot freshness, release provenance, and metric
-publication without reviewing, commenting, repairing, or merging. A failed
-smoke rolls back automatically, including a first install whose exact prior
-state was “absent.”
+suppression from masking a split comparison failure. The install smoke first
+uses a marker-driven read-only healthcheck to verify GitHub API access, snapshot
+freshness, release provenance, and metric publication without reviewing,
+commenting, repairing, or merging. It then starts one install-only `codex exec`
+session from the immutable release with the review repository read-only and
+GitHub/API token environment removed. The timer is not enabled unless that
+session returns the exact canary response and advances its dedicated
+healthcheck timestamp. A failed smoke rolls back automatically, including a
+first install whose exact prior state was “absent.”
 
 ## Verification
 

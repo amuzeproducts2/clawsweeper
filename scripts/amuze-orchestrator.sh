@@ -21,6 +21,7 @@ export CLAWSWEEPER_RUNTIME_STATE_DIR="${CLAWSWEEPER_RUNTIME_STATE_DIR:-${STATE_D
 export CLAWSWEEPER_RUNTIME_CONFIG_DIR="${CLAWSWEEPER_RUNTIME_CONFIG_DIR:-${STATE_DIR}/xdg-config}"
 export CLAWSWEEPER_RUNTIME_CACHE_DIR="${CLAWSWEEPER_RUNTIME_CACHE_DIR:-${STATE_DIR}/xdg-cache}"
 export CLAWSWEEPER_GIT_CONFIG_PATH="${CLAWSWEEPER_GIT_CONFIG_PATH:-${STATE_DIR}/gitconfig}"
+export CODEX_HOME="/root/.codex"
 export CLAWSWEEPER_METRICS_PATH="${CLAWSWEEPER_METRICS_PATH:-/var/lib/node_exporter/textfile_collector/clawsweeper_orchestrator.prom}"
 export CLAWSWEEPER_HEALTHCHECK_METRICS_PATH="${CLAWSWEEPER_HEALTHCHECK_METRICS_PATH:-/var/lib/node_exporter/textfile_collector/clawsweeper_healthcheck.prom}"
 export CLAWSWEEPER_SECURITY_ALERTS_JSON="${CLAWSWEEPER_SECURITY_ALERTS_JSON:-/var/lib/node_exporter/textfile_collector/openclaw_github_watchdog.json}"
@@ -49,7 +50,9 @@ export CLAWSWEEPER_ALLOW_AGENT_APPROVAL_FALLBACK="${CLAWSWEEPER_ALLOW_AGENT_APPR
 export CLAWSWEEPER_AUTOMERGE_MAX_ATTEMPTS_PER_HEAD="${CLAWSWEEPER_AUTOMERGE_MAX_ATTEMPTS_PER_HEAD:-3}"
 export CLAWSWEEPER_MAX_ITEMS_PER_REPO="${CLAWSWEEPER_MAX_ITEMS_PER_REPO:-${MAX_ITEMS_PER_REPO}}"
 RUNNER_MODE_ARGS=()
+INSTALL_SMOKE=0
 if [ -f "${STATE_DIR}/.install-smoke" ]; then
+  INSTALL_SMOKE=1
   RUNNER_MODE_ARGS+=(--healthcheck)
 fi
 
@@ -154,6 +157,16 @@ output="$(
 )"
 exit_code=$?
 set -e
+
+if [ "${exit_code}" -eq 0 ] && [ "${INSTALL_SMOKE}" -eq 1 ]; then
+  if ! "${RELEASE_ROOT}/scripts/codex-runtime-smoke.sh" \
+    "${RELEASE_ROOT}" \
+    "${STATE_DIR}" \
+    "${CLAWSWEEPER_HEALTHCHECK_METRICS_PATH}"; then
+    exit_code=1
+    output='{"status":"failed","processed":0,"summary":[{"error":"Codex runtime smoke failed"}]}'
+  fi
+fi
 
 if [ "${exit_code}" -eq 0 ]; then
   append_history "ok" "${exit_code}" "${output}"

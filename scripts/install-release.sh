@@ -45,6 +45,15 @@ healthcheck_timestamp() {
     "${HEALTHCHECK_METRICS_PATH}"
 }
 
+codex_runtime_timestamp() {
+  if [ ! -f "${HEALTHCHECK_METRICS_PATH}" ]; then
+    printf '0\n'
+    return
+  fi
+  awk '$1 == "clawsweeper_healthcheck_codex_runtime_timestamp_seconds" { value=$2 } END { print value+0 }' \
+    "${HEALTHCHECK_METRICS_PATH}"
+}
+
 optional_checksum() {
   if [ -f "$1" ]; then
     sha256sum "$1" | awk '{print $1}'
@@ -240,6 +249,7 @@ ln -s "${TARGET_DIR}" "${RELEASES_ROOT}/.current-${VERSION}"
 mv -Tf "${RELEASES_ROOT}/.current-${VERSION}" "${RELEASES_ROOT}/current"
 "${SYSTEMCTL}" daemon-reload
 SMOKE_TIMESTAMP_BEFORE="$(healthcheck_timestamp)"
+CODEX_RUNTIME_TIMESTAMP_BEFORE="$(codex_runtime_timestamp)"
 OPERATIONAL_METRICS_BEFORE="$(optional_checksum "${METRICS_PATH}")"
 install -m 0600 /dev/null "${STATE_DIR}/.install-smoke"
 # The service and installer intentionally share LOCK_PATH. Release the
@@ -250,6 +260,7 @@ flock -u 9
 exec 9>&-
 "${SYSTEMCTL}" start clawsweeper-orchestrator.service
 SMOKE_TIMESTAMP_AFTER="$(healthcheck_timestamp)"
+CODEX_RUNTIME_TIMESTAMP_AFTER="$(codex_runtime_timestamp)"
 if ! awk -v before="${SMOKE_TIMESTAMP_BEFORE}" -v after="${SMOKE_TIMESTAMP_AFTER}" \
   'BEGIN { exit !(after > before) }'; then
   echo "post-cutover smoke did not advance the separate ClawSweeper healthcheck metric" >&2
@@ -258,6 +269,16 @@ fi
 if ! grep -Eq '^clawsweeper_healthcheck_success[[:space:]]+1([[:space:]]|$)' \
   "${HEALTHCHECK_METRICS_PATH}"; then
   echo "post-cutover smoke did not report a successful ClawSweeper run" >&2
+  false
+fi
+if ! awk -v before="${CODEX_RUNTIME_TIMESTAMP_BEFORE}" -v after="${CODEX_RUNTIME_TIMESTAMP_AFTER}" \
+  'BEGIN { exit !(after > before) }'; then
+  echo "post-cutover smoke did not advance the Codex runtime timestamp" >&2
+  false
+fi
+if ! grep -Eq '^clawsweeper_healthcheck_codex_runtime_success[[:space:]]+1([[:space:]]|$)' \
+  "${HEALTHCHECK_METRICS_PATH}"; then
+  echo "post-cutover smoke did not create a Codex runtime session" >&2
   false
 fi
 if ! grep -Fqx -- \
