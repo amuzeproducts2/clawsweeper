@@ -91,9 +91,23 @@ test("a completed deterministic fallback quiesces the unchanged head and evidenc
     reviewThreads: [],
     conversationComments: [],
   };
-  const state = completedFallbackReviewState(inspection, "posted");
+  const state = completedFallbackReviewState(inspection, {
+    action: "posted",
+    headSha,
+  });
   assert.equal(state.verdict, "needs-human");
   assert.equal(reviewStateIsCurrent(state, inspection), true);
+  assert.equal(
+    completedFallbackReviewState(
+      {
+        ...inspection,
+        pr: { ...inspection.pr, headRefOid: "advanced-head" },
+      },
+      { action: "posted", headSha },
+    ),
+    null,
+    "a fallback comment for the prior head cannot complete an advanced head",
+  );
 });
 
 test("the release wrapper is revision-relative and keeps mutable state external", () => {
