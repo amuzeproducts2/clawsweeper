@@ -51,6 +51,7 @@ case "\${1:-}" in
     ignore_rules=0
     ephemeral=0
     landlock_config=0
+    web_search_disabled=0
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --output-last-message) output="$2"; shift 2; continue ;;
@@ -60,6 +61,7 @@ case "\${1:-}" in
         --ephemeral) ephemeral=1 ;;
         -c)
           [ "$2" = "features.use_legacy_landlock=true" ] && landlock_config=1
+          [ "$2" = 'web_search="disabled"' ] && web_search_disabled=1
           shift 2
           continue
           ;;
@@ -72,6 +74,7 @@ case "\${1:-}" in
     [ "$ignore_rules" -eq 1 ]
     [ "$ephemeral" -eq 1 ]
     [ "$landlock_config" -eq 1 ]
+    [ "$web_search_disabled" -eq 1 ]
     case "${mode}" in
       ok) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output" ;;
       wrong) printf 'WRONG\n' > "$output" ;;

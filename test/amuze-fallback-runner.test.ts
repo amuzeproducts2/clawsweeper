@@ -244,6 +244,18 @@ test("every ClawSweeper Codex lane selects the Landlock compatibility backend", 
   }
 });
 
+test("the isolated review and install smoke use Codex's typed disabled web-search mode", () => {
+  const reviewSource = readFileSync(new URL("../src/clawsweeper.ts", import.meta.url), "utf8");
+  const smokeSource = readFileSync(
+    new URL("../scripts/codex-runtime-smoke.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(reviewSource, /web_search="disabled"/);
+  assert.match(smokeSource, /web_search="disabled"/);
+  assert.doesNotMatch(reviewSource, /web_search=false/);
+  assert.doesNotMatch(smokeSource, /web_search=false/);
+});
+
 test("release installer migrates state, activates atomically, and captures rollback", () => {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-install-test-"));
   const version = "a".repeat(40);

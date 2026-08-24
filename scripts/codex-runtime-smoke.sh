@@ -63,6 +63,7 @@ if ! env \
   --ephemeral \
   -c 'approval_policy="never"' \
   -c "${SANDBOX_CONFIG}" \
+  -c 'web_search="disabled"' \
   --skip-git-repo-check \
   -C "${RELEASE_ROOT}" \
   --output-last-message "${OUTPUT_PATH}" \
