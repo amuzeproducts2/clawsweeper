@@ -14611,6 +14611,91 @@ process.exit(1);
   }
 });
 
+test("runCodex isolates automated reviews from unrelated Codex surfaces", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  const argsPath = join(root, "codex-args.json");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.writeFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(2)));
+const outputIndex = process.argv.indexOf("--output-last-message");
+if (outputIndex === -1) process.exit(2);
+fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const previous = {
+    PATH: process.env.PATH,
+    CODEX_ARGS_PATH: process.env.CODEX_ARGS_PATH,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_ARGS_PATH = argsPath;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(
+    closeDecision({
+      decision: "keep_open",
+      closeReason: "none",
+      confidence: "medium",
+      summary: "Review completed in the isolated automation profile.",
+      bestSolution: "Continue normal maintainer review.",
+      closeComment: "",
+      workReason: "No additional implementation is required.",
+    }),
+  );
+  try {
+    runCodexForTest({
+      item: item({ number: 83395 }),
+      context: { issue: {}, comments: [], timeline: [] },
+      git: { mainSha: "abc123", latestRelease: null },
+      model: "gpt-test",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Return a review decision.",
+    });
+
+    const args = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    assert.ok(args.includes("--ignore-user-config"));
+    assert.ok(args.includes("--ephemeral"));
+    for (const config of [
+      "include_apps_instructions=false",
+      "apps._default.enabled=false",
+      "features.apps=false",
+      "features.browser_use=false",
+      "features.child_agents_md=false",
+      "features.computer_use=false",
+      "features.image_generation=false",
+      "features.in_app_browser=false",
+      "features.multi_agent=false",
+      "features.remote_plugin=false",
+      "features.tool_search=false",
+      "features.tool_suggest=false",
+      "project_doc_max_bytes=12000",
+      "tool_output_token_limit=6000",
+      "web_search=false",
+    ]) {
+      assert.ok(args.includes(config), `missing isolated Codex config: ${config}`);
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("runCodex preserves redacted process output when Codex exits without a decision", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
