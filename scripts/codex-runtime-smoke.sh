@@ -48,7 +48,7 @@ if ! env \
   -C "${RELEASE_ROOT}" \
   --output-last-message "${OUTPUT_PATH}" \
   --sandbox read-only \
-  "Reply with exactly ${EXPECTED} and nothing else." \
+  "Use the shell tool to run test -r /proc/sys/kernel/overflowuid. Reply with exactly ${EXPECTED} and nothing else only after the command succeeds." \
   >"${LOG_PATH}" 2>&1; then
   preserve_failure_log
   echo "Codex runtime smoke could not initialize a review session" >&2
