@@ -6654,7 +6654,7 @@ function runCodex(options: {
     "features.tool_suggest=false",
     "project_doc_max_bytes=12000",
     "tool_output_token_limit=6000",
-    "web_search=false",
+    'web_search="disabled"',
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
   const configuredAttempts = Number(process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS ?? 3);

@@ -14684,7 +14684,7 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
       "features.tool_suggest=false",
       "project_doc_max_bytes=12000",
       "tool_output_token_limit=6000",
-      "web_search=false",
+      'web_search="disabled"',
     ]) {
       assert.ok(args.includes(config), `missing isolated Codex config: ${config}`);
     }
