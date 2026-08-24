@@ -6631,10 +6631,28 @@ function runCodex(options: {
       `OpenClaw checkout is dirty before reviewing #${options.item.number}:\n${dirtyBefore}`,
     );
   }
+  const modelArgs = codexModelArgs(options.model);
+  // Exact-head review needs the local checkout and shell, not interactive apps or agent fan-out.
+  // Keep the public "internal" model sentinel on user config; explicit models can be fully isolated.
   const codexConfig = [
     `model_reasoning_effort="${options.reasoningEffort}"`,
     ...codexLoginConfig(),
     'approval_policy="never"',
+    "include_apps_instructions=false",
+    "apps._default.enabled=false",
+    "features.apps=false",
+    "features.browser_use=false",
+    "features.child_agents_md=false",
+    "features.computer_use=false",
+    "features.image_generation=false",
+    "features.in_app_browser=false",
+    "features.multi_agent=false",
+    "features.remote_plugin=false",
+    "features.tool_search=false",
+    "features.tool_suggest=false",
+    "project_doc_max_bytes=12000",
+    "tool_output_token_limit=6000",
+    "web_search=false",
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
   const configuredAttempts = Number(process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS ?? 3);
@@ -6655,7 +6673,9 @@ function runCodex(options: {
       "codex",
       [
         "exec",
-        ...codexModelArgs(options.model),
+        ...(modelArgs.length > 0 ? ["--ignore-user-config"] : []),
+        "--ephemeral",
+        ...modelArgs,
         ...codexConfig.flatMap((config) => ["-c", config]),
         "-C",
         options.openclawDir,
