@@ -45,6 +45,7 @@ import { automergeOutcomeReviewedShaFromResult } from "./automerge-outcome.js";
 import { isCanonicalLandingNeedsHumanText } from "./comment-router-core.js";
 import { parsePullRequestUrl, pullRequestNumberFromUrl } from "./github-ref.js";
 import {
+  CODEX_LINUX_SANDBOX_CONFIG,
   clawsweeperGitUserEmail,
   clawsweeperGitUserName,
   codexSubprocessEnv as codexEnv,
@@ -2534,6 +2535,7 @@ function codexReviewSandboxConfigArgs() {
 function codexConfigArgs() {
   const configs = [
     'approval_policy="never"',
+    CODEX_LINUX_SANDBOX_CONFIG,
     `model_reasoning_effort=${JSON.stringify(codexReasoningEffort)}`,
   ];
   if (codexServiceTier) configs.push(`service_tier=${JSON.stringify(codexServiceTier)}`);
