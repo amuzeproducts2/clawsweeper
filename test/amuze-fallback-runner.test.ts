@@ -186,6 +186,9 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(service, /ProtectHome=read-only/);
   assert.match(service, /ReadWritePaths=.*\/root\/\.codex/);
   assert.match(service, /PrivateDevices=yes/);
+  assert.match(service, /ProtectProc=invisible/);
+  assert.match(service, /ProcSubset=all/);
+  assert.doesNotMatch(service, /ProcSubset=pid/);
   assert.match(service, /UMask=0077/);
   const builder = readFileSync(new URL("../scripts/build-release.sh", import.meta.url), "utf8");
   assert.match(builder, /codex-runtime-smoke\.sh/);

@@ -7,7 +7,17 @@ import test from "node:test";
 
 const smokeScript = new URL("../scripts/codex-runtime-smoke.sh", import.meta.url);
 
-function fixture(mode: "ok" | "wrong" | "split" | "extra-lines" | "fail") {
+function fixture(
+  mode:
+    | "ok"
+    | "wrong"
+    | "split"
+    | "extra-lines"
+    | "missing-probe"
+    | "probe-fail"
+    | "tampered-probe"
+    | "fail",
+) {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-codex-runtime-smoke-"));
   const stateDir = join(root, "state");
   const metricsPath = join(root, "health.prom");
@@ -22,6 +32,8 @@ if [ -n "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${OPENAI_API_KEY:-}\${CODEX_API_KEY:-}
 fi
 output=""
 skip_git_check=0
+procfs_probe=0
+json_events=0
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "--output-last-message" ]; then
     output="$2"
@@ -31,15 +43,59 @@ while [ "$#" -gt 0 ]; do
   if [ "$1" = "--skip-git-repo-check" ]; then
     skip_git_check=1
   fi
+  if [ "$1" = "--json" ]; then
+    json_events=1
+  fi
+  if [[ "$1" == *"Use the shell tool"* && "$1" == *"test -r /proc/sys/kernel/overflowuid"* ]]; then
+    procfs_probe=1
+  fi
   shift
 done
 [ -n "$output" ]
 [ "$skip_git_check" -eq 1 ]
+[ "$procfs_probe" -eq 1 ]
+[ "$json_events" -eq 1 ]
+emit_probe() {
+  printf '{"type":"item.completed","item":{"type":"command_execution","command":"%s","exit_code":%s,"status":"completed"}}\\n' "$1" "$2"
+}
+emit_turn_completed() {
+  printf '%s\n' '{"type":"turn.completed","usage":{}}'
+}
 case "${mode}" in
-  ok) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output" ;;
-  wrong) printf 'WRONG\n' > "$output" ;;
-  split) printf 'CLAWSWEEPER_CODEX_\nRUNTIME_OK\n' > "$output" ;;
-  extra-lines) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n\n' > "$output" ;;
+  ok)
+    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
+    emit_turn_completed
+    ;;
+  wrong)
+    printf 'WRONG\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
+    emit_turn_completed
+    ;;
+  split)
+    printf 'CLAWSWEEPER_CODEX_\nRUNTIME_OK\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
+    emit_turn_completed
+    ;;
+  extra-lines)
+    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
+    emit_turn_completed
+    ;;
+  missing-probe)
+    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
+    emit_turn_completed
+    ;;
+  probe-fail)
+    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 1
+    emit_turn_completed
+    ;;
+  tampered-probe)
+    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
+    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid || true'" 0
+    emit_turn_completed
+    ;;
   fail) printf 'fake codex failure\n' >&2; exit 17 ;;
 esac
 `,
@@ -67,6 +123,7 @@ test("Codex runtime smoke proves session execution without passing secret-bearin
     /clawsweeper_healthcheck_codex_runtime_success 1/,
   );
   assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.txt")), false);
+  assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.events.jsonl")), false);
 });
 
 test("Codex runtime smoke replaces its metric families on repeated success", () => {
@@ -116,7 +173,15 @@ clawsweeper_healthcheck_codex_runtime_timestamp_seconds 100
   assert.match(metrics, /^clawsweeper_healthcheck_codex_runtime_success 1$/m);
 });
 
-for (const mode of ["wrong", "split", "extra-lines", "fail"] as const) {
+for (const mode of [
+  "wrong",
+  "split",
+  "extra-lines",
+  "missing-probe",
+  "probe-fail",
+  "tampered-probe",
+  "fail",
+] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
     const { fakeCodex, metricsPath, root, stateDir } = fixture(mode);
     const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
@@ -126,6 +191,8 @@ for (const mode of ["wrong", "split", "extra-lines", "fail"] as const) {
     assert.notEqual(result.status, 0);
     assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.log")), false);
     assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.failed.log")), true);
+    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.events.jsonl")), false);
+    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.failed.events.jsonl")), true);
     if (existsSync(metricsPath)) {
       assert.doesNotMatch(
         readFileSync(metricsPath, "utf8"),
