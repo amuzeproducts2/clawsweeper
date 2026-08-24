@@ -7,9 +7,7 @@ import test from "node:test";
 
 const smokeScript = new URL("../scripts/codex-runtime-smoke.sh", import.meta.url);
 
-function fixture(
-  mode: "ok" | "wrong" | "split" | "extra-lines" | "sandbox-fail" | "fail",
-) {
+function fixture(mode: "ok" | "wrong" | "split" | "extra-lines" | "sandbox-fail" | "fail") {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-codex-runtime-smoke-"));
   const stateDir = join(root, "state");
   const metricsPath = join(root, "health.prom");
@@ -159,13 +157,7 @@ clawsweeper_healthcheck_codex_runtime_timestamp_seconds 100
   assert.match(metrics, /^clawsweeper_healthcheck_codex_runtime_success 1$/m);
 });
 
-for (const mode of [
-  "wrong",
-  "split",
-  "extra-lines",
-  "sandbox-fail",
-  "fail",
-] as const) {
+for (const mode of ["wrong", "split", "extra-lines", "sandbox-fail", "fail"] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
     const { fakeCodex, metricsPath, root, stateDir } = fixture(mode);
     const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {

@@ -1,8 +1,4 @@
-import {
-  CODEX_LINUX_SANDBOX_CONFIG,
-  codexModelArgs,
-  internalCodexModel,
-} from "../codex-env.js";
+import { CODEX_LINUX_SANDBOX_CONFIG, codexModelArgs, internalCodexModel } from "../codex-env.js";
 
 export { CODEX_LINUX_SANDBOX_CONFIG, codexModelArgs, internalCodexModel };
 
