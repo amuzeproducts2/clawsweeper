@@ -189,6 +189,7 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(service, /ProtectProc=invisible/);
   assert.match(service, /ProcSubset=all/);
   assert.doesNotMatch(service, /ProcSubset=pid/);
+  assert.match(service, /RestrictNamespaces=yes/);
   assert.match(service, /UMask=0077/);
   const builder = readFileSync(new URL("../scripts/build-release.sh", import.meta.url), "utf8");
   assert.match(builder, /codex-runtime-smoke\.sh/);
@@ -212,6 +213,35 @@ test("the release wrapper is revision-relative and keeps mutable state external"
     readFileSync(new URL("../config/target-repositories.json", import.meta.url), "utf8"),
   );
   assert.ok(targetConfiguration.target_inventory.owners.includes("amuzeproducts2"));
+});
+
+test("every ClawSweeper Codex lane selects the Landlock compatibility backend", () => {
+  const constant = "CODEX_LINUX_SANDBOX_CONFIG";
+  for (const [relativePath, expectedReferences] of [
+    ["../src/codex-env.ts", 1],
+    ["../src/clawsweeper.ts", 3],
+    ["../src/commit-sweeper.ts", 2],
+    ["../src/pr-close-coverage-proof.ts", 2],
+    ["../src/repair/run-worker.ts", 2],
+    ["../src/repair/execute-fix-artifact.ts", 2],
+  ] as const) {
+    const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
+    assert.equal(
+      source.match(new RegExp(constant, "g"))?.length ?? 0,
+      expectedReferences,
+      `${relativePath} must bind every Codex invocation to Landlock`,
+    );
+  }
+  for (const relativePath of [
+    "../scripts/amuze-fallback-runner.mjs",
+    "../scripts/codex-runtime-smoke.sh",
+  ]) {
+    assert.match(
+      readFileSync(new URL(relativePath, import.meta.url), "utf8"),
+      /features\.use_legacy_landlock=true/,
+      `${relativePath} must bind Codex to Landlock`,
+    );
+  }
 });
 
 test("release installer migrates state, activates atomically, and captures rollback", () => {

@@ -8,15 +8,7 @@ import test from "node:test";
 const smokeScript = new URL("../scripts/codex-runtime-smoke.sh", import.meta.url);
 
 function fixture(
-  mode:
-    | "ok"
-    | "wrong"
-    | "split"
-    | "extra-lines"
-    | "missing-probe"
-    | "probe-fail"
-    | "tampered-probe"
-    | "fail",
+  mode: "ok" | "wrong" | "split" | "extra-lines" | "sandbox-fail" | "fail",
 ) {
   const root = mkdtempSync(join(tmpdir(), "clawsweeper-codex-runtime-smoke-"));
   const stateDir = join(root, "state");
@@ -30,73 +22,68 @@ set -euo pipefail
 if [ -n "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${OPENAI_API_KEY:-}\${CODEX_API_KEY:-}" ]; then
   exit 91
 fi
-output=""
-skip_git_check=0
-procfs_probe=0
-json_events=0
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = "--output-last-message" ]; then
-    output="$2"
+case "\${1:-}" in
+  sandbox)
+    [ "\${2:-}" = "linux" ]
     shift 2
-    continue
-  fi
-  if [ "$1" = "--skip-git-repo-check" ]; then
-    skip_git_check=1
-  fi
-  if [ "$1" = "--json" ]; then
-    json_events=1
-  fi
-  if [[ "$1" == *"Use the shell tool"* && "$1" == *"test -r /proc/sys/kernel/overflowuid"* ]]; then
-    procfs_probe=1
-  fi
-  shift
-done
-[ -n "$output" ]
-[ "$skip_git_check" -eq 1 ]
-[ "$procfs_probe" -eq 1 ]
-[ "$json_events" -eq 1 ]
-emit_probe() {
-  printf '{"type":"item.completed","item":{"type":"command_execution","command":"%s","exit_code":%s,"status":"completed"}}\\n' "$1" "$2"
-}
-emit_turn_completed() {
-  printf '%s\n' '{"type":"turn.completed","usage":{}}'
-}
-case "${mode}" in
-  ok)
-    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
-    emit_turn_completed
+    landlock_config=0
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "-c" ]; then
+        [ "$2" = "features.use_legacy_landlock=true" ] && landlock_config=1
+        shift 2
+        continue
+      fi
+      break
+    done
+    [ "$landlock_config" -eq 1 ]
+    [ "$#" -eq 3 ]
+    [ "$1" = "/usr/bin/test" ]
+    [ "$2" = "-r" ]
+    [ "$3" = "/proc/sys/kernel/overflowuid" ]
+    if [ "${mode}" = "sandbox-fail" ]; then
+      printf 'fake sandbox failure\n' >&2
+      exit 17
+    fi
     ;;
-  wrong)
-    printf 'WRONG\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
-    emit_turn_completed
+  exec)
+    shift
+    output=""
+    skip_git_check=0
+    ignore_user_config=0
+    ignore_rules=0
+    ephemeral=0
+    landlock_config=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --output-last-message) output="$2"; shift 2; continue ;;
+        --skip-git-repo-check) skip_git_check=1 ;;
+        --ignore-user-config) ignore_user_config=1 ;;
+        --ignore-rules) ignore_rules=1 ;;
+        --ephemeral) ephemeral=1 ;;
+        -c)
+          [ "$2" = "features.use_legacy_landlock=true" ] && landlock_config=1
+          shift 2
+          continue
+          ;;
+      esac
+      shift
+    done
+    [ -n "$output" ]
+    [ "$skip_git_check" -eq 1 ]
+    [ "$ignore_user_config" -eq 1 ]
+    [ "$ignore_rules" -eq 1 ]
+    [ "$ephemeral" -eq 1 ]
+    [ "$landlock_config" -eq 1 ]
+    case "${mode}" in
+      ok) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output" ;;
+      wrong) printf 'WRONG\n' > "$output" ;;
+      split) printf 'CLAWSWEEPER_CODEX_\nRUNTIME_OK\n' > "$output" ;;
+      extra-lines) printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n\n' > "$output" ;;
+      fail) printf 'fake codex failure\n' >&2; exit 17 ;;
+      *) printf 'unexpected fake mode\n' >&2; exit 18 ;;
+    esac
     ;;
-  split)
-    printf 'CLAWSWEEPER_CODEX_\nRUNTIME_OK\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
-    emit_turn_completed
-    ;;
-  extra-lines)
-    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 0
-    emit_turn_completed
-    ;;
-  missing-probe)
-    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
-    emit_turn_completed
-    ;;
-  probe-fail)
-    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid'" 1
-    emit_turn_completed
-    ;;
-  tampered-probe)
-    printf 'CLAWSWEEPER_CODEX_RUNTIME_OK\n' > "$output"
-    emit_probe "/bin/bash -lc 'test -r /proc/sys/kernel/overflowuid || true'" 0
-    emit_turn_completed
-    ;;
-  fail) printf 'fake codex failure\n' >&2; exit 17 ;;
+  *) printf 'unexpected codex command\n' >&2; exit 19 ;;
 esac
 `,
   );
@@ -123,7 +110,6 @@ test("Codex runtime smoke proves session execution without passing secret-bearin
     /clawsweeper_healthcheck_codex_runtime_success 1/,
   );
   assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.txt")), false);
-  assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.events.jsonl")), false);
 });
 
 test("Codex runtime smoke replaces its metric families on repeated success", () => {
@@ -177,9 +163,7 @@ for (const mode of [
   "wrong",
   "split",
   "extra-lines",
-  "missing-probe",
-  "probe-fail",
-  "tampered-probe",
+  "sandbox-fail",
   "fail",
 ] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
@@ -191,8 +175,6 @@ for (const mode of [
     assert.notEqual(result.status, 0);
     assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.log")), false);
     assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.failed.log")), true);
-    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.events.jsonl")), false);
-    assert.equal(existsSync(join(stateDir, "codex-runtime-smoke.failed.events.jsonl")), true);
     if (existsSync(metricsPath)) {
       assert.doesNotMatch(
         readFileSync(metricsPath, "utf8"),

@@ -25,6 +25,7 @@ import {
   type RepositoryProfile,
 } from "./repository-profiles.js";
 import {
+  CODEX_LINUX_SANDBOX_CONFIG,
   codexEnv,
   codexLoginConfig,
   codexModelArgs,
@@ -6638,6 +6639,7 @@ function runCodex(options: {
     `model_reasoning_effort="${options.reasoningEffort}"`,
     ...codexLoginConfig(),
     'approval_policy="never"',
+    CODEX_LINUX_SANDBOX_CONFIG,
     "include_apps_instructions=false",
     "apps._default.enabled=false",
     "features.apps=false",
@@ -6926,6 +6928,7 @@ function runCodexAssist(options: {
     `model_reasoning_effort="${options.reasoningEffort}"`,
     ...codexLoginConfig(),
     'approval_policy="never"',
+    CODEX_LINUX_SANDBOX_CONFIG,
   ];
   const result = spawnSync(
     "codex",

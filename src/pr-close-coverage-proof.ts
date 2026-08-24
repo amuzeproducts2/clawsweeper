@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
-import { codexEnv, codexLoginConfig, codexModelArgs } from "./codex-env.js";
+import {
+  CODEX_LINUX_SANDBOX_CONFIG,
+  codexEnv,
+  codexLoginConfig,
+  codexModelArgs,
+} from "./codex-env.js";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { safeOutputTail, truncateText } from "./clawsweeper-text.js";
@@ -254,6 +259,7 @@ export function runPrCloseCoverageProofModel(options: {
     `model_reasoning_effort="${options.runtime.reasoningEffort}"`,
     ...codexLoginConfig(),
     'approval_policy="never"',
+    CODEX_LINUX_SANDBOX_CONFIG,
   ];
   if (options.runtime.serviceTier) {
     codexConfig.splice(1, 0, `service_tier="${options.runtime.serviceTier}"`);

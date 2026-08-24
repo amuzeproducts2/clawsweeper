@@ -2985,6 +2985,8 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
       "-c",
       'approval_policy="never"',
       "-c",
+      "features.use_legacy_landlock=true",
+      "-c",
       'model_reasoning_effort="high"',
       "--output-last-message",
       outputPath,

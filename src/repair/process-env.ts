@@ -1,6 +1,10 @@
-import { codexModelArgs, internalCodexModel } from "../codex-env.js";
+import {
+  CODEX_LINUX_SANDBOX_CONFIG,
+  codexModelArgs,
+  internalCodexModel,
+} from "../codex-env.js";
 
-export { codexModelArgs, internalCodexModel };
+export { CODEX_LINUX_SANDBOX_CONFIG, codexModelArgs, internalCodexModel };
 
 export function ghCliEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return withoutColor({ ...process.env, ...overrides });

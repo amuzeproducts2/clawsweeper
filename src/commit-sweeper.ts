@@ -11,7 +11,13 @@ import {
 import { publishCheckFromReport, splitFrontMatter } from "./commit-checks.js";
 import { argBool, argNumber, argString, parseArgs, type Args } from "./clawsweeper-args.js";
 import { safeOutputTail } from "./clawsweeper-text.js";
-import { codexEnv, codexLoginConfig, codexModelArgs, PUBLIC_CODEX_MODEL } from "./codex-env.js";
+import {
+  CODEX_LINUX_SANDBOX_CONFIG,
+  codexEnv,
+  codexLoginConfig,
+  codexModelArgs,
+  PUBLIC_CODEX_MODEL,
+} from "./codex-env.js";
 import { runText } from "./command.js";
 import { ghRetryKind, ghRetryWaitMs } from "./github-retry.js";
 import { DEFAULT_TARGET_REPO, repositoryProfileFor } from "./repository-profiles.js";
@@ -298,6 +304,7 @@ function runCodex(options: {
     `model_reasoning_effort="${options.reasoningEffort}"`,
     ...codexLoginConfig(),
     'approval_policy="never"',
+    CODEX_LINUX_SANDBOX_CONFIG,
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
   const result = spawnSync(
