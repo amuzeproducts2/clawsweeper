@@ -224,7 +224,7 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.ok(targetConfiguration.target_inventory.owners.includes("amuzeproducts2"));
 });
 
-test("every ClawSweeper Codex lane selects the Landlock compatibility backend", () => {
+test("every ClawSweeper Codex lane selects the supported bubblewrap backend", () => {
   const constant = "CODEX_LINUX_SANDBOX_CONFIG";
   for (const [relativePath, expectedReferences] of [
     ["../src/codex-env.ts", 1],
@@ -238,7 +238,7 @@ test("every ClawSweeper Codex lane selects the Landlock compatibility backend", 
     assert.equal(
       source.match(new RegExp(constant, "g"))?.length ?? 0,
       expectedReferences,
-      `${relativePath} must bind every Codex invocation to Landlock`,
+      `${relativePath} must bind every Codex invocation to bubblewrap`,
     );
   }
   for (const relativePath of [
@@ -247,8 +247,8 @@ test("every ClawSweeper Codex lane selects the Landlock compatibility backend", 
   ]) {
     assert.match(
       readFileSync(new URL(relativePath, import.meta.url), "utf8"),
-      /features\.use_legacy_landlock=true/,
-      `${relativePath} must bind Codex to Landlock`,
+      /features\.use_legacy_landlock=false/,
+      `${relativePath} must bind Codex to bubblewrap`,
     );
   }
 });
@@ -283,6 +283,12 @@ test("release installer migrates state, activates atomically, and captures rollb
   mkdirSync(join(bundle, "systemd"), { recursive: true });
   mkdirSync(stateDir, { recursive: true });
   mkdirSync(systemdDir, { recursive: true });
+  const allocationDir = join(systemdDir, "clawsweeper-orchestrator.service.d");
+  mkdirSync(allocationDir, { recursive: true });
+  const allocationPath = join(allocationDir, "40-llm-allocation.conf");
+  const allocation = "[Service]\nEnvironment=CLAWSWEEPER_CODEX_REASONING_EFFORT=medium\n";
+  writeFileSync(allocationPath, allocation);
+
   mkdirSync(join(legacyArtifacts, "merges"), { recursive: true });
   writeFileSync(join(stateDir, "sentinel-old"), "before\n");
   writeFileSync(join(legacyArtifacts, "merges", "attempt.json"), "{}\n");
@@ -365,6 +371,7 @@ esac
     },
   });
   assert.equal(installed.status, 0, installed.stderr);
+  assert.equal(readFileSync(allocationPath, "utf8"), allocation);
   assert.equal(
     readlinkSync(join(releasesRoot, "current")),
     join(releasesRoot, "releases", version),
@@ -410,6 +417,7 @@ esac
     env: { ...process.env, CLAWSWEEPER_SYSTEMCTL: fakeSystemctl },
   });
   assert.equal(rolledBack.status, 0, rolledBack.stderr);
+  assert.equal(readFileSync(allocationPath, "utf8"), allocation);
   assert.equal(readFileSync(join(stateDir, "sentinel-old"), "utf8"), "before\n");
   assert.equal(existsSync(join(stateDir, "new-release-state")), false);
   assert.ok(
@@ -3334,7 +3342,7 @@ test("repair evidence is revalidated on the committed final head before it can b
     if (args.includes("--help"))
       return { status: 0, stdout: "--sandbox-state-json --permission-profile" };
     assert.ok(args.includes('sandbox_mode="workspace-write"'));
-    assert.ok(args.includes("features.use_legacy_landlock=true"));
+    assert.ok(args.includes("features.use_legacy_landlock=false"));
     const separator = args.indexOf("--");
     return spawnSync(args[separator + 1], args.slice(separator + 2), {
       ...options,

@@ -7,7 +7,7 @@ export type CodexEnvOptions = {
 };
 
 export const PUBLIC_CODEX_MODEL = "internal";
-export const CODEX_LINUX_SANDBOX_CONFIG = "features.use_legacy_landlock=true";
+export const CODEX_LINUX_SANDBOX_CONFIG = "features.use_legacy_landlock=false";
 
 export function internalCodexModel(requestedModel: string): string {
   return process.env.CLAWSWEEPER_INTERNAL_MODEL?.trim() || requestedModel;

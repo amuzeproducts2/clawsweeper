@@ -20,20 +20,16 @@ set -euo pipefail
 if [ -n "\${GH_TOKEN:-}\${GITHUB_TOKEN:-}\${OPENAI_API_KEY:-}\${CODEX_API_KEY:-}" ]; then
   exit 91
 fi
+if [ "\${1:-}" = "-c" ]; then
+  [ "$2" = 'sandbox_mode="workspace-write"' ]
+  [ "$3" = "-c" ]
+  [ "$4" = "features.use_legacy_landlock=false" ]
+  shift 4
+fi
 case "\${1:-}" in
   sandbox)
-    [ "\${2:-}" = "linux" ]
+    [ "\${2:-}" = "--" ]
     shift 2
-    landlock_config=0
-    while [ "$#" -gt 0 ]; do
-      if [ "$1" = "-c" ]; then
-        [ "$2" = "features.use_legacy_landlock=true" ] && landlock_config=1
-        shift 2
-        continue
-      fi
-      break
-    done
-    [ "$landlock_config" -eq 1 ]
     [ "$#" -eq 3 ]
     [ "$1" = "/usr/bin/test" ]
     [ "$2" = "-r" ]
@@ -60,7 +56,7 @@ case "\${1:-}" in
         --ignore-rules) ignore_rules=1 ;;
         --ephemeral) ephemeral=1 ;;
         -c)
-          [ "$2" = "features.use_legacy_landlock=true" ] && landlock_config=1
+          [ "$2" = "features.use_legacy_landlock=false" ] && landlock_config=1
           [ "$2" = 'web_search="disabled"' ] && web_search_disabled=1
           shift 2
           continue
@@ -94,7 +90,7 @@ esac
 
 test("Codex runtime smoke proves session execution without passing secret-bearing env", () => {
   const { fakeCodex, metricsPath, root, stateDir } = fixture("ok");
-  const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
+  const result = spawnSync("/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -128,7 +124,7 @@ clawsweeper_healthcheck_codex_runtime_timestamp_seconds 100
   );
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
+    const result = spawnSync("/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
       encoding: "utf8",
       env: { ...process.env, CLAWSWEEPER_CODEX_BIN: fakeCodex },
     });
@@ -163,7 +159,7 @@ clawsweeper_healthcheck_codex_runtime_timestamp_seconds 100
 for (const mode of ["wrong", "split", "extra-lines", "sandbox-fail", "fail"] as const) {
   test(`Codex runtime smoke fails closed for ${mode} output`, () => {
     const { fakeCodex, metricsPath, root, stateDir } = fixture(mode);
-    const result = spawnSync("/usr/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
+    const result = spawnSync("/bin/bash", [smokeScript.pathname, root, stateDir, metricsPath], {
       encoding: "utf8",
       env: { ...process.env, CLAWSWEEPER_CODEX_BIN: fakeCodex },
     });

@@ -234,11 +234,8 @@ if [ ! -f "${STATE_DIR}/run-history.jsonl" ] && [ -f "${LEGACY_HISTORY}" ]; then
   cp -a "${LEGACY_HISTORY}" "${STATE_DIR}/run-history.jsonl"
 fi
 
-for unit in clawsweeper-orchestrator.service clawsweeper-orchestrator.timer; do
-  if [ -d "${SYSTEMD_DIR}/${unit}.d" ]; then
-    mv "${SYSTEMD_DIR}/${unit}.d" "${BACKUP_DIR}/${unit}.d.removed-during-cutover"
-  fi
-done
+# Preserve operator allocation/security drop-ins. The verified rollback snapshot
+# already covers these files; never silently remove local protections at cutover.
 install -m 0644 \
   "${TARGET_DIR}/systemd/clawsweeper-orchestrator.service" \
   "${SYSTEMD_DIR}/clawsweeper-orchestrator.service"
