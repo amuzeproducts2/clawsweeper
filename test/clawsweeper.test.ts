@@ -14550,7 +14550,7 @@ test("runtime budget only trips after a positive elapsed limit", () => {
   assert.equal(runtimeBudgetExceeded(1000, 5000, 6000), true);
 });
 
-test("runCodex accepts valid structured output after non-zero Codex exit", () => {
+test("runCodex rejects valid structured output after non-zero Codex exit", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
@@ -14566,6 +14566,7 @@ const fs = require("node:fs");
 const outputIndex = process.argv.indexOf("--output-last-message");
 if (outputIndex === -1) process.exit(2);
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 process.stderr.write("wrote structured output before shutdown failure\\n");
 process.exit(1);
 `,
@@ -14586,22 +14587,23 @@ process.exit(1);
     }),
   );
   try {
-    const decision = runCodexForTest({
-      item: item({ number: 83393 }),
-      context: { issue: {}, comments: [], timeline: [] },
-      git: { mainSha: "abc123", latestRelease: null },
-      model: "gpt-test",
-      openclawDir,
-      reasoningEffort: "high",
-      sandboxMode: "read-only",
-      serviceTier: "",
-      timeoutMs: 10_000,
-      workDir,
-      prompt: "Return a review decision.",
-    });
-
-    assert.equal(decision.decision, "keep_open");
-    assert.equal(decision.summary, "Keep open for maintainer follow-up.");
+    assert.throws(
+      () =>
+        runCodexForTest({
+          item: item({ number: 83393 }),
+          context: { issue: {}, comments: [], timeline: [] },
+          git: { mainSha: "abc123", latestRelease: null },
+          model: "gpt-test",
+          openclawDir,
+          reasoningEffort: "high",
+          sandboxMode: "read-only",
+          serviceTier: "",
+          timeoutMs: 10_000,
+          workDir,
+          prompt: "Return a review decision.",
+        }),
+      /exit 1/,
+    );
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
@@ -14629,6 +14631,7 @@ fs.writeFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(
 const outputIndex = process.argv.indexOf("--output-last-message");
 if (outputIndex === -1) process.exit(2);
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 `,
   );
   chmodSync(codexPath, 0o755);
@@ -14808,6 +14811,7 @@ if (attempt === 1) {
 }
 const outputIndex = process.argv.indexOf("--output-last-message");
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 `,
   );
   chmodSync(codexPath, 0o755);

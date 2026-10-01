@@ -43,6 +43,7 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
+import { verifiedCheckoutEvidence } from "./codex-command-evidence.js";
 import { runText } from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
@@ -409,6 +410,12 @@ interface ReviewCommentRenderOptions {
 }
 
 interface Decision {
+  executionEvidence?: {
+    version: 2;
+    baseSha: string;
+    headSha: string | null;
+    transcriptHash: string;
+  };
   decision: DecisionKind;
   closeReason: CloseReason;
   confidence: Confidence;
@@ -6616,7 +6623,7 @@ function runCodex(options: {
     : prepareMediaProofArtifacts(options.context, proofScratchDir);
   const promptPath = join(options.workDir, `${options.item.number}.prompt.md`);
   const outputPath = join(options.workDir, `${options.item.number}.json`);
-  const prompt =
+  const reviewPrompt =
     options.prompt ??
     buildReviewPrompt(
       options.item,
@@ -6625,6 +6632,44 @@ function runCodex(options: {
       options.additionalPrompt,
       mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
     ).text;
+  const headSha = pullHeadShaFromContext(options.context);
+  if (headSha) {
+    if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
+    const object = spawnSync("git", ["cat-file", "-e", `${headSha}^{commit}`], {
+      cwd: options.openclawDir,
+      encoding: "utf8",
+    });
+    if (object.error || object.status !== 0) {
+      const fetched = spawnSync(
+        "git",
+        ["fetch", "origin", `pull/${options.item.number}/head`, "--depth", "1"],
+        {
+          cwd: options.openclawDir,
+          encoding: "utf8",
+          timeout: Math.min(options.timeoutMs, 60_000),
+        },
+      );
+      const identity = spawnSync("git", ["rev-parse", "FETCH_HEAD"], {
+        cwd: options.openclawDir,
+        encoding: "utf8",
+      });
+      if (
+        fetched.error ||
+        fetched.status !== 0 ||
+        identity.status !== 0 ||
+        identity.stdout.trim() !== headSha
+      ) {
+        throw new Error("Could not hydrate the exact PR head for independent shell review");
+      }
+    }
+  }
+  const prompt = [
+    "Before reviewing, run these exact shell commands separately. Their successful tool events are required as checkout evidence:",
+    "git rev-parse HEAD",
+    ...(headSha ? [`git show --format=fuller --stat ${headSha}`] : []),
+    "If either fails, report the access failure; never infer approval from supplied context alone.",
+    reviewPrompt,
+  ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
   const dirtyBefore = openclawDirtyStatus(options.openclawDir);
   if (dirtyBefore) {
@@ -6675,6 +6720,7 @@ function runCodex(options: {
       "codex",
       [
         "exec",
+        "--json",
         ...(modelArgs.length > 0 ? ["--ignore-user-config"] : []),
         "--ephemeral",
         ...modelArgs,
@@ -6716,19 +6762,25 @@ function runCodex(options: {
       failureDetail = `Codex review failed for #${options.item.number}: ${redactInternalCodexModel(result.error.message)}`;
     }
     const hasOutput = existsSync(outputPath);
-    if (!result.error && hasOutput) {
+    if (!result.error && result.status === 0 && hasOutput) {
       try {
         const decision = parseDecision(
           JSON.parse(readFileSync(outputPath, "utf8").trim()),
           options.item,
         );
-        if (result.status !== 0) {
-          console.error(
-            `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
-              options.item.number
-            } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
-          );
+        if (!verifiedCheckoutEvidence(result.stdout ?? "", options.git.mainSha, headSha)) {
+          throw new Error("missing successful checkout/PR-head shell evidence");
         }
+        decision.executionEvidence = {
+          version: 2,
+          baseSha: options.git.mainSha,
+          headSha,
+          transcriptHash: sha256(result.stdout ?? ""),
+        };
+        writeFileSync(
+          join(options.workDir, `${options.item.number}.execution.json`),
+          JSON.stringify(decision.executionEvidence, null, 2),
+        );
         return decision;
       } catch (error) {
         failureDetail = `Codex review failed for #${options.item.number} with exit ${
@@ -13865,6 +13917,14 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
+    ...(frontMatterValue(markdown, "requires_product_decision") === "true"
+      ? ["escalation=business"]
+      : []),
+    ...(frontMatterValue(markdown, "review_execution_version") === "2" &&
+    frontMatterValue(markdown, "local_review_head_sha") === headSha &&
+    hasVerifiedLocalCheckoutAccess(markdown)
+      ? ["evidence=verified-v2"]
+      : []),
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
   const humanReviewMarkers = (): string => {
@@ -13955,7 +14015,9 @@ function repairLoopFindingRepairAllowed(markdown: string): boolean {
 function isRepairLoopPassReport(markdown: string): boolean {
   const labels = frontMatterStringArray(markdown, "labels");
   return (
-    (labels.includes(AUTOMERGE_LABEL) || labels.includes(AUTOFIX_LABEL)) &&
+    (labels.includes(AUTOMERGE_LABEL) ||
+      labels.includes(AUTOFIX_LABEL) ||
+      frontMatterValue(markdown, "autonomous_pr_review") === "true") &&
     frontMatterValue(markdown, "review_status") === "complete" &&
     frontMatterValue(markdown, "confidence") === "high" &&
     frontMatterValue(markdown, "decision") === "keep_open" &&
@@ -14652,7 +14714,11 @@ review_context_elapsed_ms: ${reviewTelemetryNumber(options.runtime.contextElapse
 review_codex_elapsed_ms: ${reviewTelemetryNumber(options.runtime.codexElapsedMs)}
 review_mode: ${options.reviewMode}
 review_status: ${options.decision.summary.startsWith("Codex review failed") ? "failed" : "complete"}
-local_checkout_access: verified
+autonomous_pr_review: ${process.env.CLAWSWEEPER_AMUZE_AUTONOMOUS_REVIEW === "1"}
+local_checkout_access: ${options.decision.executionEvidence ? "verified" : "unverified"}
+review_execution_version: ${options.decision.executionEvidence?.version ?? "unknown"}
+local_review_head_sha: ${options.decision.executionEvidence?.headSha ?? "unknown"}
+review_transcript_sha256: ${options.decision.executionEvidence?.transcriptHash ?? "unknown"}
 item_snapshot_hash: ${options.snapshotHash}
 close_comment_sha256: ${options.action.closeComment ? sha256(options.action.closeComment) : "none"}
 review_comment_sha256: none
