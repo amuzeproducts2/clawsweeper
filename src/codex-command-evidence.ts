@@ -7,7 +7,7 @@ export function matchesExecutedCommand(actual: string, expected: string): boolea
   const quoted = `'${expected.replaceAll("'", "'\\''")}'`;
   return (
     actual === expected ||
-    ["/bin/bash", "/bin/zsh", "/bin/sh"].some(
+    ["/bin/bash", "/bin/zsh", "/bin/sh", "/usr/bin/bash", "/usr/bin/zsh", "/usr/bin/sh"].some(
       (shell) => actual === `${shell} -lc ${quoted}` || actual === `${shell} -c ${quoted}`,
     )
   );
