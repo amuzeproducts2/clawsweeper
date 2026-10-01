@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   CODEX_LINUX_SANDBOX_CONFIG,
+  codexBinary,
   codexEnv,
   codexLoginConfig,
   codexModelArgs,
@@ -265,7 +266,7 @@ export function runPrCloseCoverageProofModel(options: {
     codexConfig.splice(1, 0, `service_tier="${options.runtime.serviceTier}"`);
   }
   const result = spawnSync(
-    "codex",
+    codexBinary(),
     [
       "exec",
       ...codexModelArgs(options.runtime.model),

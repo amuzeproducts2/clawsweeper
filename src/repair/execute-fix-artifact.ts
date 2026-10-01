@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { codexBinary } from "../codex-env.js";
 import type { JsonValue, LooseRecord } from "./json-types.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -321,7 +322,7 @@ function spawnCodexSyncWithHeartbeat(
 ) {
   const heartbeat = startCodexHeartbeat(label);
   try {
-    return spawnSync("codex", args, options);
+    return spawnSync(codexBinary(), args, options);
   } finally {
     stopCodexHeartbeat(heartbeat);
   }

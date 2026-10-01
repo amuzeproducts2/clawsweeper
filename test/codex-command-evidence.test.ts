@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  checkoutExecutionDiagnostics,
   matchesExecutedCommand,
   successfulCodexCommands,
   verifiedCheckoutEvidence,
@@ -71,4 +72,34 @@ test("Codex 0.156 usr-bin shell events retain strict final-head evidence", () =>
     matchesExecutedCommand("/tmp/bash -lc 'git rev-parse HEAD'", "git rev-parse HEAD"),
     false,
   );
+});
+
+test("checkout diagnostics distinguish absent, failed and stale evidence without retaining secrets", () => {
+  const secret = "PRIVATE_CREDENTIAL_CONTENT";
+  const transcript = [
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: secret } }),
+    event("print-secret " + secret, secret),
+    event("git rev-parse HEAD", secret, { exit_code: 1, status: secret }),
+    event("git rev-parse HEAD", "stale"),
+    event("git show --format=fuller --stat final", "commit final\n" + secret),
+    "malformed " + secret,
+  ].join("\n");
+  const diagnostic = checkoutExecutionDiagnostics(transcript, "base", "final");
+  assert.equal(diagnostic.commandEvents, 4);
+  assert.equal(diagnostic.completedCommandEvents, 4);
+  assert.equal(diagnostic.malformedLines, 1);
+  assert.deepEqual(diagnostic.headIdentity, [
+    { status: "unknown", exitCode: 1, matchesHead: false },
+    { status: "completed", exitCode: 0, matchesHead: false },
+  ]);
+  assert.equal(diagnostic.verified, false);
+  assert.equal(diagnostic.prHeadSummary[0].matchesHead, true);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /PRIVATE_CREDENTIAL|print-secret|stale/);
+  assert.deepEqual(checkoutExecutionDiagnostics("", "base", "final").headIdentity, []);
+  const repeated = Array.from({ length: 50 }, () => event("git rev-parse HEAD", "final")).join(
+    "\n",
+  );
+  const bounded = checkoutExecutionDiagnostics(repeated, "base", null);
+  assert.equal(bounded.commandEvents, 50);
+  assert.equal(bounded.headIdentity.length, 8);
 });

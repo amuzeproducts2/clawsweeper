@@ -27,6 +27,7 @@ import {
 } from "./repository-profiles.js";
 import {
   CODEX_LINUX_SANDBOX_CONFIG,
+  codexBinary,
   codexEnv,
   codexLoginConfig,
   codexModelArgs,
@@ -44,7 +45,10 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
-import { verifiedCheckoutEvidence } from "./codex-command-evidence.js";
+import {
+  checkoutExecutionDiagnostics,
+  verifiedCheckoutEvidence,
+} from "./codex-command-evidence.js";
 import { runText } from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
@@ -6785,7 +6789,7 @@ function runCodexInCheckout(options: {
       );
     }
     const result = spawnSync(
-      "codex",
+      codexBinary(),
       [
         "exec",
         "--json",
@@ -6816,6 +6820,20 @@ function runCodexInCheckout(options: {
         maxBuffer: 128 * 1024 * 1024,
         timeout: remainingMs,
       },
+    );
+    writeFileSync(
+      join(options.workDir, `${options.item.number}.execution-diagnostics.json`),
+      JSON.stringify(
+        {
+          ...checkoutExecutionDiagnostics(result.stdout ?? "", options.git.mainSha, headSha),
+          attempt,
+          processExitCode: result.status,
+          processFailed: Boolean(result.error || result.signal),
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
     );
     const dirtyAfter = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
     if (dirtyAfter) {
@@ -7052,7 +7070,7 @@ function runCodexAssist(options: {
     CODEX_LINUX_SANDBOX_CONFIG,
   ];
   const result = spawnSync(
-    "codex",
+    codexBinary(),
     [
       "exec",
       ...codexModelArgs(options.model),

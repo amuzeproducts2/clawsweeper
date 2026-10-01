@@ -13,6 +13,7 @@ import { argBool, argNumber, argString, parseArgs, type Args } from "./clawsweep
 import { safeOutputTail } from "./clawsweeper-text.js";
 import {
   CODEX_LINUX_SANDBOX_CONFIG,
+  codexBinary,
   codexEnv,
   codexLoginConfig,
   codexModelArgs,
@@ -308,7 +309,7 @@ function runCodex(options: {
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
   const result = spawnSync(
-    "codex",
+    codexBinary(),
     [
       "exec",
       ...codexModelArgs(options.model),
