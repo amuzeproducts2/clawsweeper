@@ -6635,6 +6635,9 @@ function runCodex(options: {
   const headSha = pullHeadShaFromContext(options.context);
   if (headSha) {
     if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
+    if (!Number.isSafeInteger(options.item.number) || options.item.number <= 0) {
+      throw new Error("PR review requires a positive integer item number");
+    }
     const object = spawnSync("git", ["cat-file", "-e", `${headSha}^{commit}`], {
       cwd: options.openclawDir,
       encoding: "utf8",
@@ -6642,7 +6645,7 @@ function runCodex(options: {
     if (object.error || object.status !== 0) {
       const fetched = spawnSync(
         "git",
-        ["fetch", "origin", `pull/${options.item.number}/head`, "--depth", "1"],
+        ["fetch", "--depth", "1", "--", "origin", `refs/pull/${options.item.number}/head`],
         {
           cwd: options.openclawDir,
           encoding: "utf8",
