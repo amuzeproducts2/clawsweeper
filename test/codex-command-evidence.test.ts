@@ -49,3 +49,26 @@ test("model prose, failed or incomplete commands, and echo lookalikes are not ex
   assert.equal(matchesExecutedCommand("echo 'pnpm test'", "pnpm test"), false);
   assert.equal(matchesExecutedCommand("/bin/bash -lc 'pnpm test || true'", "pnpm test"), false);
 });
+
+test("Codex 0.156 usr-bin shell events retain strict final-head evidence", () => {
+  const head = "2849b391252aa8be7941320fa4c09d8d0e34ab43";
+  const transcript = `${event("/usr/bin/bash -lc 'git rev-parse HEAD'", head + "\n")}\n${event(`/usr/bin/bash -lc 'git show --format=fuller --stat ${head}'`, `commit ${head}\n`)}`;
+  assert.equal(verifiedCheckoutEvidence(transcript, "base", head), true);
+  assert.equal(verifiedCheckoutEvidence(transcript, "base", "stale"), false);
+  assert.equal(
+    matchesExecutedCommand("/usr/bin/bash -lc 'git rev-parse HEAD || true'", "git rev-parse HEAD"),
+    false,
+  );
+  assert.equal(
+    verifiedCheckoutEvidence(
+      event("/usr/bin/bash -lc 'git rev-parse HEAD'", head, { exit_code: 1 }),
+      "base",
+      null,
+    ),
+    false,
+  );
+  assert.equal(
+    matchesExecutedCommand("/tmp/bash -lc 'git rev-parse HEAD'", "git rev-parse HEAD"),
+    false,
+  );
+});
