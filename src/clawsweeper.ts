@@ -6604,6 +6604,7 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   const headSha = pullHeadShaFromContext(options.context);
   if (!headSha) return runCodexInCheckout(options);
   const deadline = Date.now() + options.timeoutMs;
+  const cleanupReserveMs = Math.min(60_000, Math.max(1000, Math.floor(options.timeoutMs / 5)));
   const remaining = () => Math.max(1, deadline - Date.now());
   if (headSha) {
     if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
@@ -6654,12 +6655,12 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   let reviewFailed = false;
   let cleanupFailed = false;
   try {
-    if (remaining() <= 1000)
+    if (remaining() <= cleanupReserveMs)
       throw new Error("Exact-head review deadline exhausted before Codex execution");
     decision = runCodexInCheckout({
       ...options,
       openclawDir: checkout,
-      timeoutMs: remaining() - 1000,
+      timeoutMs: remaining() - cleanupReserveMs,
     });
   } catch (error) {
     reviewFailed = true;
@@ -6672,6 +6673,8 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
     });
     cleanupFailed = Boolean(removed.error || removed.status !== 0);
   }
+  if (reviewFailed && cleanupFailed)
+    throw new Error("Exact-head review and checkout cleanup both failed", { cause: reviewError });
   if (reviewFailed) throw reviewError;
   if (cleanupFailed || !decision)
     throw new Error("Exact-head review checkout cleanup failed; refusing to accept review");

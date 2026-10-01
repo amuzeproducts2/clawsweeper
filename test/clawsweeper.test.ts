@@ -18611,6 +18611,18 @@ test("runCodex reviews a detached exact PR head, rejects base-head evidence, and
   git("commit", "-am", "final");
   const head = git("rev-parse", "HEAD");
   git("checkout", "--detach", base);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const gitPath = join(binDir, "git");
+  writeFileSync(
+    gitPath,
+    `#!/usr/bin/env node
+const cp=require("node:child_process");
+if(process.env.CODEX_FIXTURE_FAIL_CLEANUP && process.argv[2]==="worktree" && process.argv[3]==="remove") process.exit(1);
+const result=cp.spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:"inherit"});
+process.exit(result.status ?? 1);
+`,
+  );
+  chmodSync(gitPath, 0o755);
   const codexPath = join(binDir, "codex");
   writeFileSync(
     codexPath,
@@ -18627,6 +18639,7 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
   chmodSync(codexPath, 0o755);
   const prior = {
     PATH: process.env.PATH,
+    CODEX_FIXTURE_FAIL_CLEANUP: process.env.CODEX_FIXTURE_FAIL_CLEANUP,
     CODEX_FIXTURE_HEAD: process.env.CODEX_FIXTURE_HEAD,
     CODEX_FIXTURE_WRONG_HEAD: process.env.CODEX_FIXTURE_WRONG_HEAD,
     CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
@@ -18652,6 +18665,22 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
   try {
     process.env.CODEX_FIXTURE_WRONG_HEAD = base;
     assert.throws(() => runCodexForTest(options), /missing successful checkout/);
+    process.env.CODEX_FIXTURE_FAIL_CLEANUP = "1";
+    assert.throws(
+      () => runCodexForTest(options),
+      (error: Error) => {
+        assert.match(error.message, /review and checkout cleanup both failed/);
+        assert.match(String(error.cause), /missing successful checkout/);
+        return true;
+      },
+    );
+    delete process.env.CODEX_FIXTURE_FAIL_CLEANUP;
+    const leaked = git("worktree", "list", "--porcelain")
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice(9))
+      .filter((path) => path.includes("99.checkout-"));
+    for (const path of leaked) git("worktree", "remove", "--force", "--", path);
     delete process.env.CODEX_FIXTURE_WRONG_HEAD;
     assert.equal(runCodexForTest(options).executionEvidence.headSha, head);
     assert.equal(git("rev-parse", "HEAD"), base);
