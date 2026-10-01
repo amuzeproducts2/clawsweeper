@@ -3360,7 +3360,14 @@ function reviewItem({
         status: "repair_waiting_checks",
       };
     }
-    if (["human", "blocked"].includes(repairMerge.action)) {
+    if (repairMerge.action === "blocked") {
+      return {
+        mode: "agent-owned-merge-recovery",
+        merge: repairMerge,
+        status: "repair_merge_retry",
+      };
+    }
+    if (repairMerge.action === "human") {
       return {
         mode: "autonomous-repair-paused",
         merge: repairMerge,
