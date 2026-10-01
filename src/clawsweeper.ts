@@ -6603,6 +6603,8 @@ export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decisi
 function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   const headSha = pullHeadShaFromContext(options.context);
   if (!headSha) return runCodexInCheckout(options);
+  const deadline = Date.now() + options.timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
   if (headSha) {
     if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
     if (!Number.isSafeInteger(options.item.number) || options.item.number <= 0) {
@@ -6611,6 +6613,7 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
     const object = spawnSync("git", ["cat-file", "-e", `${headSha}^{commit}`], {
       cwd: options.openclawDir,
       encoding: "utf8",
+      timeout: remaining(),
     });
     if (object.error || object.status !== 0) {
       const fetched = spawnSync(
@@ -6619,12 +6622,13 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
         {
           cwd: options.openclawDir,
           encoding: "utf8",
-          timeout: Math.min(options.timeoutMs, 60_000),
+          timeout: remaining(),
         },
       );
       const identity = spawnSync("git", ["rev-parse", "FETCH_HEAD"], {
         cwd: options.openclawDir,
         encoding: "utf8",
+        timeout: remaining(),
       });
       if (
         fetched.error ||
@@ -6641,7 +6645,7 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   const added = spawnSync("git", ["worktree", "add", "--detach", "--", checkout, headSha], {
     cwd: options.openclawDir,
     encoding: "utf8",
-    timeout: 60_000,
+    timeout: remaining(),
   });
   if (added.error || added.status !== 0)
     throw new Error("Could not prepare exact-head review checkout");
@@ -6650,7 +6654,13 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   let reviewFailed = false;
   let cleanupFailed = false;
   try {
-    decision = runCodexInCheckout({ ...options, openclawDir: checkout });
+    if (remaining() <= 1000)
+      throw new Error("Exact-head review deadline exhausted before Codex execution");
+    decision = runCodexInCheckout({
+      ...options,
+      openclawDir: checkout,
+      timeoutMs: remaining() - 1000,
+    });
   } catch (error) {
     reviewFailed = true;
     reviewError = error;
@@ -6658,7 +6668,7 @@ function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
     const removed = spawnSync("git", ["worktree", "remove", "--force", "--", checkout], {
       cwd: options.openclawDir,
       encoding: "utf8",
-      timeout: 60_000,
+      timeout: remaining(),
     });
     cleanupFailed = Boolean(removed.error || removed.status !== 0);
   }
@@ -6703,6 +6713,11 @@ function runCodexInCheckout(options: {
     ).text;
   const headSha = pullHeadShaFromContext(options.context);
   const prompt = [
+    ...(headSha
+      ? [
+          `This checkout is the detached PR head ${headSha}. The base/main commit is ${options.git.mainSha}; use git show at that base SHA for comparisons rather than treating this checkout as main.`,
+        ]
+      : []),
     "Before reviewing, run these exact shell commands separately. Their successful tool events are required as checkout evidence:",
     "git rev-parse HEAD",
     ...(headSha ? [`git show --format=fuller --stat ${headSha}`] : []),

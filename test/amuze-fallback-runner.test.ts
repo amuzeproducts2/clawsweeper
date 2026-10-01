@@ -3389,3 +3389,98 @@ test("final regression execution stays in the existing sandbox and fails closed 
   );
   assert.throws(() => finalRegressionSandboxArgs("pnpm test", "unknown"), /unverified/);
 });
+
+test("paused and adjudicated heads cannot be shadowed by an older pushed SHA", () => {
+  assert.equal(
+    repairStateTracksHead(
+      { status: "paused", headSha, pausedSha: headSha, pushedSha: "older" },
+      headSha,
+    ),
+    true,
+  );
+  assert.equal(
+    repairStateTracksHead(
+      { status: "adjudicated", headSha, evidenceHeadSha: headSha, pushedSha: "older" },
+      headSha,
+    ),
+    true,
+  );
+  assert.equal(
+    repairStateTracksHead({ status: "pushed", headSha, pushedSha: "older" }, headSha),
+    false,
+  );
+  assert.equal(statusConsumesAction("repair_merge_retry"), false);
+});
+
+test("required lint and build validation are allowed while adjudications still need a regression", () => {
+  const evidence = repairEvidence();
+  evidence.validations.push(
+    { command: "pnpm run lint", exitCode: 0, kind: "required" },
+    { command: "pnpm run build", exitCode: 0, kind: "required" },
+  );
+  const transcript = [
+    validationTranscript(),
+    validationTranscript(0, "pnpm run lint"),
+    validationTranscript(0, "pnpm run build"),
+  ].join("\n");
+  assert.equal(
+    parseRepairEvidence(evidence, headSha, [activeThread()], transcript).validations.length,
+    3,
+  );
+  assert.throws(
+    () =>
+      parseRepairEvidence(
+        {
+          ...evidence,
+          adjudications: [{ ...evidence.adjudications[0], regressionCommand: "pnpm run lint" }],
+        },
+        headSha,
+        [activeThread()],
+        transcript,
+      ),
+    /regression validation/,
+  );
+});
+
+test("explicit security-sensitive review markers preserve permission escalation", () => {
+  const pr = pullRequest();
+  const ordinary = {
+    ...agentPass(),
+    body: agentPass().body.replace("verdict:pass", "verdict:needs-human"),
+  };
+  assert.equal(latestExactHeadAgentVerdict(pr, [ordinary]).escalation, null);
+  const security = {
+    ...ordinary,
+    body:
+      ordinary.body + `\n<!-- clawsweeper-security:security-sensitive item=7 sha=${headSha} -->`,
+  };
+  assert.equal(latestExactHeadAgentVerdict(pr, [security]).escalation, "permission");
+});
+
+test("the post-fallback fingerprint preserves the two-session budget after the agent's own comment changes", () => {
+  const before = {
+    pr: pullRequest(),
+    checks: passingChecks(),
+    conversationComments: [],
+    reviews: [],
+    reviewThreads: [],
+  };
+  const after = {
+    ...before,
+    conversationComments: [
+      { ...agentPass(), body: agentPass().body.replace("verdict:pass", "verdict:needs-human") },
+    ],
+  };
+  const beforeFingerprint = mergeSignalFingerprint(before);
+  const afterFingerprint = mergeSignalFingerprint(after);
+  assert.notEqual(beforeFingerprint, afterFingerprint);
+  const state = {
+    headSha,
+    attempts: 2,
+    attemptFingerprint: beforeFingerprint,
+    ...completedFallbackReviewState(after, { action: "patched", headSha }),
+  };
+  assert.equal(state.attemptFingerprint, afterFingerprint);
+  assert.equal(state.attempts, 2);
+  assert.equal(state.status, "agent_owned");
+});

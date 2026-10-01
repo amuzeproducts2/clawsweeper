@@ -1492,17 +1492,24 @@ function captureReviewState(repo, number, inspection, verdictOverride = null) {
 function completedFallbackReviewState(inspection, comment) {
   if (!["posted", "patched"].includes(comment?.action)) return null;
   if (!comment?.headSha || comment.headSha !== inspection?.pr?.headRefOid) return null;
+  const fingerprint = mergeSignalFingerprint(inspection);
   return {
     status: "agent_owned",
     headSha: comment.headSha,
-    evidenceFingerprint: mergeSignalFingerprint(inspection),
+    evidenceFingerprint: fingerprint,
+    attemptFingerprint: fingerprint,
     verdict: "needs-repair",
   };
 }
 
 function captureCompletedFallbackReviewState(repo, number, inspection, comment) {
   const state = completedFallbackReviewState(inspection, comment);
-  if (state) writeReviewState(repo, number, { ...readReviewState(repo, number), ...state });
+  if (state)
+    writeReviewState(repo, number, {
+      ...readReviewState(repo, number),
+      ...state,
+      attemptFingerprint: state.evidenceFingerprint,
+    });
   return state;
 }
 
@@ -1841,7 +1848,15 @@ function latestExactHeadAgentVerdict(pr, comments = []) {
       ) {
         verdict = {
           verdict: marker[1].toLowerCase(),
-          escalation: /\bescalation=(business|permission)\b/.exec(marker[0])?.[1] ?? null,
+          escalation:
+            /\bescalation=(business|permission)\b/.exec(marker[0])?.[1] ??
+            ([
+              ...body.matchAll(
+                /<!--\s*clawsweeper-security:security-sensitive\b[^>]*\bsha=([a-f0-9]+)\b[^>]*-->/gi,
+              ),
+            ].some((entry) => entry[1] === pr.headRefOid)
+              ? "permission"
+              : null),
           author: login,
           commentId: comment?.id ?? null,
           url: comment?.html_url ?? comment?.url ?? null,
@@ -2444,7 +2459,12 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
 
 function repairStateTracksHead(state, headSha) {
   if (!["pushed", "adjudicated", "paused"].includes(state?.status)) return false;
-  const trackedSha = state.pushedSha ?? state.pausedSha ?? state.headSha;
+  const trackedSha =
+    state.status === "paused"
+      ? (state.pausedSha ?? state.headSha)
+      : state.status === "adjudicated"
+        ? (state.evidenceHeadSha ?? state.headSha)
+        : state.pushedSha;
   return trackedSha === headSha;
 }
 
@@ -2507,7 +2527,11 @@ function parseRepairEvidence(value, headSha, threads, transcript) {
         !/(?:^|&&\s*)(?:python[\d.]*\s+-m\s+)?(?:pytest|pnpm|npm|node|make|cargo|go|deno|bun)\b/.test(
           entry.command ?? "",
         ) ||
-        !/\b(test|pytest|check|vitest|jest|unittest)\b/.test(entry.command ?? "") ||
+        !(
+          entry.kind === "regression"
+            ? /\b(test|pytest|check|vitest|jest|unittest)\b/
+            : /\b(test|pytest|check|lint|build|typecheck|format|compile|py_compile|pylint|vet|tsc)\b/
+        ).test(entry.command ?? "") ||
         !commands.some((completed) => matchesExecutedCommand(completed.command, entry.command)),
     )
   ) {
@@ -2522,7 +2546,10 @@ function parseRepairEvidence(value, headSha, threads, transcript) {
       !entry.rationale?.trim() ||
       !Array.isArray(entry.evidence) ||
       !entry.evidence.length ||
-      !validations.some((validation) => validation.command === entry.regressionCommand)
+      !validations.some(
+        (validation) =>
+          validation.kind === "regression" && validation.command === entry.regressionCommand,
+      )
     ) {
       throw new Error("finding disposition lacks concrete evidence and regression validation");
     }
@@ -3382,6 +3409,8 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     writeRepairState(repo, number, {
       headSha: pr.headRefOid,
       status: evidence.escalation ? "paused" : "agent_owned",
+      pushedSha: null,
+      pausedSha: evidence.escalation ? pr.headRefOid : null,
       reason: evidence.summary,
     });
     return { action: "blocked", reason: evidence.summary, continueToComment: false };
@@ -3393,6 +3422,8 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     writeRepairState(repo, number, {
       headSha: pr.headRefOid,
       status: evidence.outcome === "adjudicated" ? "adjudicated" : "evidence_failed",
+      pushedSha: null,
+      pausedSha: null,
       evidenceHeadSha: pr.headRefOid,
       adjudications: evidence.adjudications,
       validations: evidence.validations,
@@ -3932,6 +3963,7 @@ function statusConsumesAction(status) {
     "agent_review_unchanged",
     "agent_review_retry_exhausted",
     "merge_retry_exhausted",
+    "repair_merge_retry",
     "autorepair_skipped",
     "dependabot_merge_skipped",
     "dependabot_merge_blocked",
