@@ -173,7 +173,8 @@ test("the release wrapper is revision-relative and keeps mutable state external"
   assert.match(wrapper, /MAX_ITEMS:-10/);
   assert.match(wrapper, /MAX_ITEMS_PER_REPO:-1/);
   assert.match(wrapper, /CLAWSWEEPER_RELEASE_REVISION/);
-  assert.match(wrapper, /CODEX_HOME="\/root\/\.codex"/);
+  assert.match(wrapper, /CODEX_HOME="\$\{CODEX_HOME:-\/root\/\.codex\}"/);
+  assert.match(wrapper, /GITHUB_CREDENTIAL_FILE="\$\{CLAWSWEEPER_GITHUB_CREDENTIAL_FILE:-/);
   assert.match(wrapper, /verify-release\.sh/);
   assert.match(wrapper, /dist\/clawsweeper\.js/);
   assert.match(wrapper, /MAX_ACTIONS:-2/);
