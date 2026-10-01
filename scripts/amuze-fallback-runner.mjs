@@ -3494,6 +3494,8 @@ function reviewItem({
   const targetEnv = {
     CLAWSWEEPER_TARGET_DEFAULT_BRANCH: branch,
     CLAWSWEEPER_AMUZE_AUTONOMOUS_REVIEW: "1",
+    // Durable outer recovery owns the two-session budget; avoid nested model retries.
+    CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: "1",
   };
   const repairEvidence = readRepairState(repo, number);
   try {
