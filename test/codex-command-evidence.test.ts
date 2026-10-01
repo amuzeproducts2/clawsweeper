@@ -23,7 +23,11 @@ function event(command, output, overrides = {}) {
 test("checkout evidence requires successful shell events for base and final PR head", () => {
   const base = event("git rev-parse HEAD", "base\n");
   const head = event("/bin/bash -lc 'git show --format=fuller --stat final'", "commit final\n");
-  assert.equal(verifiedCheckoutEvidence(`${base}\n${head}`, "base", "final"), true);
+  assert.equal(verifiedCheckoutEvidence(`${base}\n${head}`, "base", "final"), false);
+  assert.equal(
+    verifiedCheckoutEvidence(`${event("git rev-parse HEAD", "final")}\n${head}`, "base", "final"),
+    true,
+  );
   assert.equal(verifiedCheckoutEvidence(base, "base", "final"), false);
   assert.equal(verifiedCheckoutEvidence(`${base}\n${head}`, "base", "old"), false);
   assert.equal(verifiedCheckoutEvidence("local_checkout_access: verified", "base", null), false);

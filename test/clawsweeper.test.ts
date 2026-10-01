@@ -18587,3 +18587,81 @@ test("scheduled workflow jobs fail closed on forks without an explicit opt-in", 
     );
   }
 });
+
+test("runCodex reviews a detached exact PR head, rejects base-head evidence, and preserves the base checkout", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const repoDir = join(root, "repo");
+  const binDir = join(root, "bin");
+  mkdirSync(repoDir);
+  mkdirSync(binDir);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repoDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  git("init");
+  git("config", "user.name", "fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  writeFileSync(join(repoDir, "version.txt"), "base");
+  git("add", ".");
+  git("commit", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  writeFileSync(join(repoDir, "version.txt"), "final");
+  git("commit", "-am", "final");
+  const head = git("rev-parse", "HEAD");
+  git("checkout", "--detach", base);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs=require("node:fs"), cp=require("node:child_process");
+const head=cp.execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
+if(head!==process.env.CODEX_FIXTURE_HEAD || fs.readFileSync("version.txt","utf8")!=="final") process.exit(5);
+const event=(command,output)=>process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command,aggregated_output:output}})+"\\n");
+event("git rev-parse HEAD",process.env.CODEX_FIXTURE_WRONG_HEAD || head);
+event("git show --format=fuller --stat "+head,"commit "+head);
+fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const prior = {
+    PATH: process.env.PATH,
+    CODEX_FIXTURE_HEAD: process.env.CODEX_FIXTURE_HEAD,
+    CODEX_FIXTURE_WRONG_HEAD: process.env.CODEX_FIXTURE_WRONG_HEAD,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH}`;
+  process.env.CODEX_FIXTURE_HEAD = head;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(
+    closeDecision({ decision: "keep_open", closeReason: "none" }),
+  );
+  const options = {
+    item: item({ kind: "pull_request", number: 99 }),
+    context: { issue: {}, comments: [], timeline: [], pullRequest: { head: { sha: head } } },
+    git: { mainSha: base, latestRelease: null },
+    model: "gpt-test",
+    openclawDir: repoDir,
+    reasoningEffort: "medium",
+    sandboxMode: "read-only",
+    serviceTier: "",
+    timeoutMs: 10_000,
+    workDir: join(root, "work"),
+    prompt: "Review the final checkout.",
+  };
+  try {
+    process.env.CODEX_FIXTURE_WRONG_HEAD = base;
+    assert.throws(() => runCodexForTest(options), /missing successful checkout/);
+    delete process.env.CODEX_FIXTURE_WRONG_HEAD;
+    assert.equal(runCodexForTest(options).executionEvidence.headSha, head);
+    assert.equal(git("rev-parse", "HEAD"), base);
+    assert.equal(readFileSync(join(repoDir, "version.txt"), "utf8"), "base");
+    assert.equal(git("worktree", "list", "--porcelain").match(/^worktree /gm).length, 1);
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});

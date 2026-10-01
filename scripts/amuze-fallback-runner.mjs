@@ -1175,7 +1175,11 @@ function withinRunBudget({ processed, actionItems, maxItems, maxActions, nowMs, 
 }
 
 function loopStateRequiresTurn(pr, repairState = {}, mergeState = {}) {
-  if (repairStateTracksHead(repairState, pr.headRefOid) && repairState.status !== "paused")
+  if (
+    (repairStateTracksHead(repairState, pr.headRefOid) ||
+      reviewedStateTracksHead(repairState, pr.headRefOid)) &&
+    repairState.status !== "paused"
+  )
     return true;
   if (mergeState.headSha !== pr.headRefOid) return false;
   if (["failed", "started"].includes(mergeState.status)) return true;
@@ -1828,7 +1832,7 @@ function latestExactHeadAgentVerdict(pr, comments = []) {
     )) {
       if (marker[2] !== pr.headRefOid) continue;
       // Legacy comments claimed verified checkout access without execution evidence.
-      if (marker[1].toLowerCase() === "pass" && !/\bevidence=verified-v2\b/.test(marker[0]))
+      if (marker[1].toLowerCase() === "pass" && !/\bevidence=verified-v3\b/.test(marker[0]))
         continue;
       if (
         !verdict ||
@@ -2439,9 +2443,13 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
 }
 
 function repairStateTracksHead(state, headSha) {
-  if (!["pushed", "reviewed", "adjudicated", "paused"].includes(state?.status)) return false;
+  if (!["pushed", "adjudicated", "paused"].includes(state?.status)) return false;
   const trackedSha = state.pushedSha ?? state.pausedSha ?? state.headSha;
   return trackedSha === headSha;
+}
+
+function reviewedStateTracksHead(state, headSha) {
+  return state?.status === "reviewed" && state.reviewedSha === headSha;
 }
 
 function adjudicatedThreadsForHead(state, headSha, threads) {
@@ -2526,6 +2534,72 @@ function parseRepairEvidence(value, headSha, threads, transcript) {
   return { ...value, adjudications };
 }
 
+function finalRegressionSandboxArgs(command, help) {
+  const backend = /^\s+linux\b/m.test(help) ? ["linux"] : [];
+  if (!backend.length && !/--sandbox-state-json|--permission-profile/.test(help)) {
+    throw new Error("Installed Codex sandbox command shape is unverified");
+  }
+  return [
+    "-c",
+    'sandbox_mode="workspace-write"',
+    "-c",
+    "features.use_legacy_landlock=true",
+    "sandbox",
+    ...backend,
+    "--",
+    "/bin/sh",
+    "-c",
+    command,
+  ];
+}
+
+function verifyCommittedRepair(targetDir, headSha, evidence, timeoutMs, execute = runBestEffort) {
+  const commands = [...new Set(evidence.validations.map((entry) => entry.command))];
+  if (!commands.length || commands.length > 3)
+    throw new Error("Final repair regression command budget exceeded");
+  const deadline = Date.now() + Math.min(timeoutMs, 120_000);
+  const sandboxHelp = execute("codex", ["sandbox", "--help"], {
+    cwd: targetDir,
+    env: codexRepairEnv(),
+    timeoutMs: Math.min(timeoutMs, 10_000),
+  });
+  if (sandboxHelp.error || sandboxHelp.status !== 0)
+    throw new Error("Final regression sandbox is unavailable");
+  const validations = [];
+  for (const command of commands) {
+    if (run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim() !== headSha) {
+      throw new Error("Repair head changed before final regression validation");
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error("Final repair regression time budget exhausted");
+    // Reuse the worker's workspace-write policy. Never run model-supplied tests unsandboxed.
+    const result = execute("codex", finalRegressionSandboxArgs(command, sandboxHelp.stdout), {
+      cwd: targetDir,
+      env: codexRepairEnv(),
+      timeoutMs: remaining,
+    });
+    if (result.error || result.status !== 0)
+      throw new Error(
+        `Final-head regression failed: ${command}; ${result.error?.code ?? result.status}`,
+      );
+    if (
+      run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim() !== headSha ||
+      diffNameOnly(targetDir).length
+    ) {
+      throw new Error("Final regression changed the committed repair checkout");
+    }
+    validations.push({
+      command,
+      exitCode: 0,
+      headSha,
+      outputHash: createHash("sha256")
+        .update(result.stdout ?? "")
+        .digest("hex"),
+    });
+  }
+  return { ...evidence, headSha, validations };
+}
+
 function currentRepairForHead(repo, number, headSha) {
   const state = readRepairState(repo, number);
   return repairStateTracksHead(state, headSha) ? state : null;
@@ -2536,9 +2610,14 @@ function agentRepairReadiness(
   number,
   inspection,
   repairState = readRepairState(repo, number),
+  lane = "repair",
 ) {
   const { pr, checks, stats, conversationComments, reviewThreads, reviews } = inspection;
-  if (!repairStateTracksHead(repairState, pr.headRefOid)) {
+  if (
+    !(lane === "routine"
+      ? reviewedStateTracksHead(repairState, pr.headRefOid)
+      : repairStateTracksHead(repairState, pr.headRefOid))
+  ) {
     return { status: "ineligible", reason: "current head is not a ClawSweeper repair" };
   }
   if (repairState.status === "paused") {
@@ -2616,52 +2695,140 @@ function agentRepairReadiness(
   };
 }
 
-function resolveAdjudicatedReviewThreads(repo, reviewThreads = [], state = {}, headSha = "") {
-  const resolved = [];
-  for (const thread of adjudicatedThreadsForHead(
-    state,
-    headSha,
-    actionableReviewThreads(reviewThreads),
-  )) {
-    const result = runJsonBestEffort(
-      "gh",
-      [
-        "api",
-        "graphql",
-        "-F",
-        `threadId=${thread.id}`,
-        "-f",
-        "query=mutation($threadId:ID!){resolvePullRequestReviewThread(input:{threadId:$threadId}){thread{isResolved}}}",
-      ],
-      null,
+function threadResolutionOutcome(result, threadId) {
+  let family = null;
+  let reason = "";
+  if (result.error || result.status !== 0) {
+    reason = String(result.error?.message || result.stderr || `gh exited ${result.status}`).slice(
+      0,
+      1000,
     );
-    if (result?.data?.resolvePullRequestReviewThread?.thread?.isResolved) resolved.push(thread.id);
+    family = /EPERM|EACCES|403|permission|not accessible by integration/i.test(reason)
+      ? "permission"
+      : "command_failure";
+  } else {
+    try {
+      const value = JSON.parse(result.stdout);
+      if (
+        value.errors?.length ||
+        value.data?.resolvePullRequestReviewThread?.thread?.isResolved !== true
+      ) {
+        family = /FORBIDDEN|permission|not accessible by integration/i.test(
+          JSON.stringify(value.errors ?? []),
+        )
+          ? "permission"
+          : "api_response";
+        reason =
+          "GitHub did not confirm thread resolution: " +
+          JSON.stringify(value.errors ?? []).slice(0, 500);
+      }
+    } catch {
+      family = "invalid_json";
+      reason = "GitHub thread-resolution response was not valid JSON";
+    }
   }
-  return resolved;
+  return family ? { threadId, family, reason } : null;
 }
 
-function autoMergeAgentRepairPr({ repo, number, inspection }) {
+function resolveAdjudicatedReviewThreads(repo, reviewThreads = [], state = {}, headSha = "") {
+  const resolved = [];
+  const failures = [];
+  const threads = adjudicatedThreadsForHead(state, headSha, actionableReviewThreads(reviewThreads));
+  const fingerprint = createHash("sha256")
+    .update(JSON.stringify(threads.map(threadFindingHash)))
+    .digest("hex");
+  const attempts =
+    state.resolutionHeadSha === headSha && state.resolutionFingerprint === fingerprint
+      ? Number(state.resolutionAttempts ?? 0)
+      : 0;
+  const budget = {
+    resolutionHeadSha: headSha,
+    resolutionFingerprint: fingerprint,
+    resolutionAttempts: threads.length ? Math.min(3, attempts + 1) : 0,
+  };
+  if (threads.length && attempts >= 3) {
+    return {
+      resolvedThreads: [],
+      failures: [
+        {
+          family: "retry_exhausted",
+          reason: "Thread resolution retry budget exhausted for unchanged findings",
+          threadId: threads[0].id,
+        },
+      ],
+      ...budget,
+    };
+  }
+  for (const thread of threads) {
+    const result = runBestEffort("gh", [
+      "api",
+      "graphql",
+      "-F",
+      `threadId=${thread.id}`,
+      "-f",
+      "query=mutation($threadId:ID!){resolvePullRequestReviewThread(input:{threadId:$threadId}){thread{isResolved}}}",
+    ]);
+    const failure = threadResolutionOutcome(result, thread.id);
+    if (failure) {
+      failures.push(failure);
+      emitReceipt(`clawsweeper:${repo}:${thread.id}`, "unexpected", failure.reason, {
+        failure_family: `thread-resolution-${failure.family}`,
+      });
+    } else resolved.push(thread.id);
+  }
+  return { resolvedThreads: resolved, failures, ...budget };
+}
+
+function autoMergeVerifiedPr({ repo, number, inspection, lane = "repair" }) {
   const { pr, reviewThreads } = inspection;
-  const readiness = agentRepairReadiness(repo, number, inspection);
+  const readiness = agentRepairReadiness(
+    repo,
+    number,
+    inspection,
+    readRepairState(repo, number),
+    lane,
+  );
   if (readiness.status === "resolve") {
     const latest = inspectPr(repo, number);
     if (
       latest.pr.headRefOid !== pr.headRefOid ||
       mergeSignalFingerprint(latest) !== mergeSignalFingerprint(inspection) ||
-      agentRepairReadiness(repo, number, latest).status !== "resolve"
+      agentRepairReadiness(repo, number, latest, readRepairState(repo, number), lane).status !==
+        "resolve"
     ) {
       return { action: "waiting", reason: "finding evidence changed before resolution" };
     }
-    const resolvedThreads = resolveAdjudicatedReviewThreads(
+    const resolution = resolveAdjudicatedReviewThreads(
       repo,
       latest.reviewThreads,
       readRepairState(repo, number),
       pr.headRefOid,
     );
+    if (resolution.failures.length) {
+      const permissionFailure = resolution.failures.some(
+        (failure) => failure.family === "permission",
+      );
+      writeRepairState(repo, number, {
+        ...resolution,
+        resolutionFailures: resolution.failures,
+        ...(permissionFailure
+          ? { status: "paused", pausedSha: pr.headRefOid, reason: resolution.failures[0].reason }
+          : {}),
+      });
+      return {
+        action: permissionFailure
+          ? "human"
+          : resolution.failures[0].family === "retry_exhausted"
+            ? "exhausted"
+            : "blocked",
+        reason: resolution.failures[0].reason,
+        ...resolution,
+      };
+    }
     return {
       action: "waiting",
       reason: "awaiting Macroscope approval after finding resolution",
-      resolvedThreads,
+      resolvedThreads: resolution.resolvedThreads,
     };
   }
   if (readiness.status !== "ready") {
@@ -2687,7 +2854,7 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
   }
 
   const state = readMergeState(repo, number);
-  const strategy = "agent-repair-squash-v1";
+  const strategy = lane === "routine" ? "agent-routine-squash-v1" : "agent-repair-squash-v1";
   if (state.headSha === pr.headRefOid && state.strategy === strategy && state.status === "merged") {
     return { action: "skipped", reason: "repair already merged", continueToReview: false };
   }
@@ -2697,17 +2864,21 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
     return recordExhaustedMergePause(repo, number, pr, strategy, attemptPlan);
   }
 
-  const resolvedThreads = resolveAdjudicatedReviewThreads(
+  const resolution = resolveAdjudicatedReviewThreads(
     repo,
     reviewThreads,
     readRepairState(repo, number),
     pr.headRefOid,
   );
+  if (resolution.failures.length)
+    return { action: "blocked", reason: resolution.failures[0].reason, ...resolution };
+  const resolvedThreads = resolution.resolvedThreads;
   // Re-fetch signals at the mutation boundary; resolving feedback is not approval.
   const finalInspection = inspectPr(repo, number);
   if (
     finalInspection.pr.headRefOid !== pr.headRefOid ||
-    agentRepairReadiness(repo, number, finalInspection).status !== "ready" ||
+    agentRepairReadiness(repo, number, finalInspection, readRepairState(repo, number), lane)
+      .status !== "ready" ||
     actionableReviewThreads(finalInspection.reviewThreads).length
   ) {
     return { action: "waiting", reason: "final-head merge evidence changed" };
@@ -2733,7 +2904,7 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
     "--subject",
     pr.title ?? `Merge repaired ${repo}#${number}`,
     "--body",
-    `Merged by ClawSweeper after repair, green exact-head checks, independent frontier review, and zero actionable review threads for ${pr.headRefOid}.`,
+    `Merged by ClawSweeper through the ${lane} lane, green exact-head checks, independent review, and zero actionable review threads for ${pr.headRefOid}.`,
   ];
   const result = runBestEffort("gh", mergeArgs);
   if (result.error || result.status !== 0) {
@@ -2756,7 +2927,7 @@ function autoMergeAgentRepairPr({ repo, number, inspection }) {
     headSha: pr.headRefOid,
     mergeSha: lookup.mergeSha,
     lookupError: lookup.error,
-    repaired: true,
+    repaired: lane === "repair",
   });
   writeMergeState(repo, number, {
     headSha: pr.headRefOid,
@@ -3012,6 +3183,7 @@ function buildAutoRepairPrompt({
     "- Run focused validation for the touched surface when dependencies/tools are available. Always leave a concise final summary with commands run.",
     "- Return structured evidence for this exact head. For EVERY unresolved finding, including outdated ones, either fix it or prove it is a false positive using source locations and a successful regression test. Outdated is never proof of resolution.",
     "- Supply validations with exact commands executed successfully and at least one regression command. A skipped test is not validation. Escalation is only business or permission; ordinary code/test/access failures remain agent-owned with outcome blocked and escalation null.",
+    "- Keep regression commands focused: at most three unique commands with a combined two-minute runtime. The runner repeats them on the committed final head; required broad CI remains a separate final-head merge gate.",
     "",
     `Repository: ${repo}`,
     `PR: #${number} - ${pr.title ?? ""}`,
@@ -3189,6 +3361,9 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
 
   let evidence;
   try {
+    if (run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim() !== pr.headRefOid) {
+      throw new Error("Worker changed the inspected repair head");
+    }
     evidence = parseRepairEvidence(
       JSON.parse(readFileSync(outputPath, "utf8")),
       pr.headRefOid,
@@ -3270,6 +3445,13 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     { cwd: targetDir },
   );
   const pushedSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
+  try {
+    evidence = verifyCommittedRepair(targetDir, pushedSha, evidence, codexTimeoutMs);
+    writeFileSync(join(repairDir, "final-head-evidence.json"), JSON.stringify(evidence, null, 2));
+  } catch (error) {
+    writeRepairState(repo, number, { status: "final_validation_failed", reason: error.message });
+    return { action: "blocked", reason: error.message, continueToComment: false };
+  }
   const push = runBestEffort(
     "git",
     [
@@ -3344,13 +3526,26 @@ function reviewItem({
   const common = ["--target-repo", repo, "--items-dir", itemsDir, "--item-number", String(number)];
   const codexEnabled = process.env.CLAWSWEEPER_ENABLE_CODEX_REVIEW !== "0";
   const inspection = inspectPr(repo, number);
-  if (currentRepairForHead(repo, number, inspection.pr.headRefOid)) {
-    const repairMerge = autoMergeAgentRepairPr({ repo, number, inspection });
+  const verifiedState = readRepairState(repo, number);
+  const verifiedLane = repairStateTracksHead(verifiedState, inspection.pr.headRefOid)
+    ? "repair"
+    : reviewedStateTracksHead(verifiedState, inspection.pr.headRefOid)
+      ? "routine"
+      : null;
+  if (verifiedLane) {
+    const repairMerge = autoMergeVerifiedPr({ repo, number, inspection, lane: verifiedLane });
+    if (["exhausted", "paused"].includes(repairMerge.action)) {
+      return {
+        mode: "agent-owned-merge-recovery",
+        merge: repairMerge,
+        status: "merge_retry_exhausted",
+      };
+    }
     if (repairMerge.action === "merged") {
       return {
-        mode: "autonomous-repair-merge",
+        mode: `autonomous-${verifiedLane}-merge`,
         merge: repairMerge,
-        status: "repair_merged",
+        status: `${verifiedLane}_merged`,
       };
     }
     if (repairMerge.action === "waiting") {
@@ -3613,7 +3808,8 @@ function reviewItem({
       writeRepairState(repo, number, {
         status: "reviewed",
         headSha: reviewedInspection.pr.headRefOid,
-        pushedSha: reviewedInspection.pr.headRefOid,
+        reviewedSha: reviewedInspection.pr.headRefOid,
+        pushedSha: null,
         evidenceHeadSha: null,
         adjudications: [],
         validations: [],
@@ -3726,6 +3922,7 @@ function statusMakesProgress(status) {
     "dependabot_merged",
     "macroscope_low_risk_merged",
     "repair_merged",
+    "routine_merged",
     "repair_pushed",
   ].includes(status);
 }
@@ -3733,6 +3930,8 @@ function statusMakesProgress(status) {
 function statusConsumesAction(status) {
   return ![
     "agent_review_unchanged",
+    "agent_review_retry_exhausted",
+    "merge_retry_exhausted",
     "autorepair_skipped",
     "dependabot_merge_skipped",
     "dependabot_merge_blocked",
@@ -4327,8 +4526,13 @@ export {
   readReviewStateFile,
   readReviewState,
   repairStateTracksHead,
+  reviewedStateTracksHead,
+  statusConsumesAction,
   parseRepairEvidence,
   adjudicatedThreadsForHead,
+  threadResolutionOutcome,
+  verifyCommittedRepair,
+  finalRegressionSandboxArgs,
   allRequiredSignalsGreen,
   reviewWasSuperseded,
   reviewStateIsCurrent,

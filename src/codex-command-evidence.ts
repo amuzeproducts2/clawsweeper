@@ -43,7 +43,7 @@ export function verifiedCheckoutEvidence(
     commands.some(
       (entry) =>
         matchesExecutedCommand(entry.command, "git rev-parse HEAD") &&
-        entry.output.trim() === baseSha,
+        entry.output.trim() === (headSha ?? baseSha),
     ) &&
     (!headSha ||
       commands.some(

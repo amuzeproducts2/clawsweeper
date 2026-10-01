@@ -5,6 +5,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -411,7 +412,7 @@ interface ReviewCommentRenderOptions {
 
 interface Decision {
   executionEvidence?: {
-    version: 2;
+    version: 3;
     baseSha: string;
     headSha: string | null;
     transcriptHash: string;
@@ -6599,40 +6600,9 @@ export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decisi
   return runCodex(options);
 }
 
-function runCodex(options: {
-  item: Item;
-  context: ItemContext;
-  git: GitInfo;
-  model: string;
-  openclawDir: string;
-  reasoningEffort: string;
-  sandboxMode: string;
-  serviceTier: string;
-  timeoutMs: number;
-  workDir: string;
-  additionalPrompt?: string;
-  proofScratchDir?: string;
-  prompt?: string;
-}): Decision {
-  ensureDir(options.workDir);
-  const proofScratchDir =
-    options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
-  ensureDir(proofScratchDir);
-  const preparedMediaProof = options.prompt
-    ? { manifestPath: null, summaryPath: null, artifacts: [] }
-    : prepareMediaProofArtifacts(options.context, proofScratchDir);
-  const promptPath = join(options.workDir, `${options.item.number}.prompt.md`);
-  const outputPath = join(options.workDir, `${options.item.number}.json`);
-  const reviewPrompt =
-    options.prompt ??
-    buildReviewPrompt(
-      options.item,
-      options.context,
-      options.git,
-      options.additionalPrompt,
-      mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
-    ).text;
+function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
   const headSha = pullHeadShaFromContext(options.context);
+  if (!headSha) return runCodexInCheckout(options);
   if (headSha) {
     if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
     if (!Number.isSafeInteger(options.item.number) || options.item.number <= 0) {
@@ -6666,6 +6636,72 @@ function runCodex(options: {
       }
     }
   }
+  ensureDir(options.workDir);
+  const checkout = mkdtempSync(join(resolve(options.workDir), `${options.item.number}.checkout-`));
+  const added = spawnSync("git", ["worktree", "add", "--detach", "--", checkout, headSha], {
+    cwd: options.openclawDir,
+    encoding: "utf8",
+    timeout: 60_000,
+  });
+  if (added.error || added.status !== 0)
+    throw new Error("Could not prepare exact-head review checkout");
+  let decision: Decision | undefined;
+  let reviewError: unknown;
+  let reviewFailed = false;
+  let cleanupFailed = false;
+  try {
+    decision = runCodexInCheckout({ ...options, openclawDir: checkout });
+  } catch (error) {
+    reviewFailed = true;
+    reviewError = error;
+  } finally {
+    const removed = spawnSync("git", ["worktree", "remove", "--force", "--", checkout], {
+      cwd: options.openclawDir,
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    cleanupFailed = Boolean(removed.error || removed.status !== 0);
+  }
+  if (reviewFailed) throw reviewError;
+  if (cleanupFailed || !decision)
+    throw new Error("Exact-head review checkout cleanup failed; refusing to accept review");
+  return decision;
+}
+
+function runCodexInCheckout(options: {
+  item: Item;
+  context: ItemContext;
+  git: GitInfo;
+  model: string;
+  openclawDir: string;
+  reasoningEffort: string;
+  sandboxMode: string;
+  serviceTier: string;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt?: string;
+  proofScratchDir?: string;
+  prompt?: string;
+}): Decision {
+  ensureDir(options.workDir);
+  const proofScratchDir =
+    options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
+  ensureDir(proofScratchDir);
+  const preparedMediaProof = options.prompt
+    ? { manifestPath: null, summaryPath: null, artifacts: [] }
+    : prepareMediaProofArtifacts(options.context, proofScratchDir);
+  const promptPath = join(options.workDir, `${options.item.number}.prompt.md`);
+  const outputPath = join(options.workDir, `${options.item.number}.json`);
+  const reviewPrompt =
+    options.prompt ??
+    buildReviewPrompt(
+      options.item,
+      options.context,
+      options.git,
+      options.additionalPrompt,
+      mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
+    ).text;
+  const headSha = pullHeadShaFromContext(options.context);
   const prompt = [
     "Before reviewing, run these exact shell commands separately. Their successful tool events are required as checkout evidence:",
     "git rev-parse HEAD",
@@ -6775,7 +6811,7 @@ function runCodex(options: {
           throw new Error("missing successful checkout/PR-head shell evidence");
         }
         decision.executionEvidence = {
-          version: 2,
+          version: 3,
           baseSha: options.git.mainSha,
           headSha,
           transcriptHash: sha256(result.stdout ?? ""),
@@ -13923,10 +13959,10 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     ...(frontMatterValue(markdown, "requires_product_decision") === "true"
       ? ["escalation=business"]
       : []),
-    ...(frontMatterValue(markdown, "review_execution_version") === "2" &&
+    ...(frontMatterValue(markdown, "review_execution_version") === "3" &&
     frontMatterValue(markdown, "local_review_head_sha") === headSha &&
     hasVerifiedLocalCheckoutAccess(markdown)
-      ? ["evidence=verified-v2"]
+      ? ["evidence=verified-v3"]
       : []),
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
