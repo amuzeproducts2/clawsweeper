@@ -47,6 +47,7 @@ import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
 import {
   checkoutExecutionDiagnostics,
+  checkoutInspectionContract,
   verifiedCheckoutEvidence,
 } from "./codex-command-evidence.js";
 import { runText } from "./command.js";
@@ -416,7 +417,7 @@ interface ReviewCommentRenderOptions {
 
 interface Decision {
   executionEvidence?: {
-    version: 3;
+    version: 4;
     baseSha: string;
     headSha: string | null;
     transcriptHash: string;
@@ -6737,11 +6738,10 @@ function runCodexInCheckout(options: {
           `This checkout is the detached PR head ${headSha}. The base/main commit is ${options.git.mainSha}; use git show at that base SHA for comparisons rather than treating this checkout as main.`,
         ]
       : []),
-    "Before reviewing, run these exact shell commands separately. Their successful tool events are required as checkout evidence:",
-    "git rev-parse HEAD",
-    ...(headSha ? [`git show --format=fuller --stat ${headSha}`] : []),
-    "If either fails, report the access failure; never infer approval from supplied context alone.",
+    checkoutInspectionContract(options.git.mainSha, headSha),
     reviewPrompt,
+    // Keep the executable requirement after the large context as well as before it.
+    checkoutInspectionContract(options.git.mainSha, headSha),
   ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
   const dirtyBefore = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
@@ -6859,7 +6859,7 @@ function runCodexInCheckout(options: {
           throw new Error("missing successful checkout/PR-head shell evidence");
         }
         decision.executionEvidence = {
-          version: 3,
+          version: 4,
           baseSha: options.git.mainSha,
           headSha,
           transcriptHash: sha256(result.stdout ?? ""),
@@ -14007,10 +14007,10 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     ...(frontMatterValue(markdown, "requires_product_decision") === "true"
       ? ["escalation=business"]
       : []),
-    ...(frontMatterValue(markdown, "review_execution_version") === "3" &&
+    ...(frontMatterValue(markdown, "review_execution_version") === "4" &&
     frontMatterValue(markdown, "local_review_head_sha") === headSha &&
     hasVerifiedLocalCheckoutAccess(markdown)
-      ? ["evidence=verified-v3"]
+      ? ["evidence=verified-v4"]
       : []),
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";

@@ -18647,11 +18647,13 @@ process.exit(result.status ?? 1);
     codexPath,
     `#!/usr/bin/env node
 const fs=require("node:fs"), cp=require("node:child_process");
+fs.readFileSync(0,"utf8");
 const head=cp.execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
 if(head!==process.env.CODEX_FIXTURE_HEAD || fs.readFileSync("version.txt","utf8")!=="final") process.exit(5);
 const event=(command,output)=>process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command,aggregated_output:output}})+"\\n");
 event("git rev-parse HEAD",process.env.CODEX_FIXTURE_WRONG_HEAD || head);
 event("git show --format=fuller --stat "+head,"commit "+head);
+if (!process.env.CODEX_FIXTURE_SKIP_PATCH) event("git diff --no-ext-diff --no-textconv --unified=3 "+process.env.CODEX_FIXTURE_BASE+" "+head+" --","diff --git a/version.txt b/version.txt\\n-base\\n+final");
 fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],process.env.CODEX_DECISION_JSON);
 `,
   );
@@ -18663,11 +18665,14 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
     PATH: process.env.PATH,
     CODEX_FIXTURE_FAIL_CLEANUP: process.env.CODEX_FIXTURE_FAIL_CLEANUP,
     CODEX_FIXTURE_HEAD: process.env.CODEX_FIXTURE_HEAD,
+    CODEX_FIXTURE_BASE: process.env.CODEX_FIXTURE_BASE,
+    CODEX_FIXTURE_SKIP_PATCH: process.env.CODEX_FIXTURE_SKIP_PATCH,
     CODEX_FIXTURE_WRONG_HEAD: process.env.CODEX_FIXTURE_WRONG_HEAD,
     CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
   };
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH}`;
   process.env.CODEX_FIXTURE_HEAD = head;
+  process.env.CODEX_FIXTURE_BASE = base;
   process.env.CODEX_DECISION_JSON = JSON.stringify(
     closeDecision({ decision: "keep_open", closeReason: "none" }),
   );
@@ -18682,7 +18687,9 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
     serviceTier: "",
     timeoutMs: 10_000,
     workDir: join(root, "work"),
-    prompt: "Review the final checkout.",
+    prompt:
+      "Historical context: tools unavailable; only return JSON.\n" +
+      "historical data\n".repeat(6000),
   };
   try {
     process.env.CODEX_FIXTURE_WRONG_HEAD = base;
@@ -18710,7 +18717,23 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
       .filter((path) => path.includes("99.checkout-"));
     for (const path of leaked) git("worktree", "remove", "--force", "--", path);
     delete process.env.CODEX_FIXTURE_WRONG_HEAD;
-    assert.equal(runCodexForTest(options).executionEvidence.headSha, head);
+    process.env.CODEX_FIXTURE_SKIP_PATCH = "1";
+    assert.throws(() => runCodexForTest(options), /missing successful checkout/);
+    delete process.env.CODEX_FIXTURE_SKIP_PATCH;
+    const inspected = runCodexForTest(options);
+    const packet = readFileSync(join(options.workDir, "99.prompt.md"), "utf8");
+    const lastContract = packet.lastIndexOf(
+      "## Mandatory fresh checkout inspection before any verdict",
+    );
+    assert.ok(lastContract > packet.lastIndexOf("historical data"));
+    assert.ok(
+      packet
+        .slice(lastContract)
+        .includes(`git diff --no-ext-diff --no-textconv --unified=3 ${base} ${head} --`),
+    );
+    assert.match(packet.slice(lastContract), /Attempt the required calls/);
+    assert.equal(inspected.executionEvidence.headSha, head);
+    assert.equal(inspected.executionEvidence.version, 4);
     process.env.GIT_BIN = gitPath;
     process.env.CODEX_FIXTURE_STATUS_COUNTER = join(root, "status-counter");
     for (const phase of ["before", "after"]) {
@@ -18731,4 +18754,22 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
     }
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("fresh source-inspection markers reject metadata-only version 3 evidence", () => {
+  const sha = "a".repeat(40);
+  const report = `---\nnumber: 7\ntype: pull_request\npull_head_sha: ${sha}\nlocal_review_head_sha: ${sha}\nlocal_checkout_access: verified\nreview_execution_version: 4\ndecision: keep_open\n---\n`;
+  assert.match(reviewAutomationMarkersFromReport(report), /evidence=verified-v4/);
+  assert.doesNotMatch(
+    reviewAutomationMarkersFromReport(
+      report.replace("review_execution_version: 4", "review_execution_version: 3"),
+    ),
+    /evidence=verified/,
+  );
+  assert.doesNotMatch(
+    reviewAutomationMarkersFromReport(
+      report.replace(`local_review_head_sha: ${sha}`, `local_review_head_sha: ${"b".repeat(40)}`),
+    ),
+    /evidence=verified/,
+  );
 });
