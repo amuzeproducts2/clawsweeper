@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   checkoutExecutionDiagnostics,
+  checkoutDiffCommand,
+  checkoutInspectionContract,
   matchesExecutedCommand,
   successfulCodexCommands,
   verifiedCheckoutEvidence,
@@ -23,10 +25,15 @@ function event(command, output, overrides = {}) {
 
 test("checkout evidence requires successful shell events for base and final PR head", () => {
   const base = event("git rev-parse HEAD", "base\n");
+  const patch = event(checkoutDiffCommand("base", "final"), "diff --git a/a b/a\n+fix");
   const head = event("/bin/bash -lc 'git show --format=fuller --stat final'", "commit final\n");
   assert.equal(verifiedCheckoutEvidence(`${base}\n${head}`, "base", "final"), false);
   assert.equal(
-    verifiedCheckoutEvidence(`${event("git rev-parse HEAD", "final")}\n${head}`, "base", "final"),
+    verifiedCheckoutEvidence(
+      `${event("git rev-parse HEAD", "final")}\n${head}\n${patch}`,
+      "base",
+      "final",
+    ),
     true,
   );
   assert.equal(verifiedCheckoutEvidence(base, "base", "final"), false);
@@ -53,7 +60,7 @@ test("model prose, failed or incomplete commands, and echo lookalikes are not ex
 
 test("Codex 0.156 usr-bin shell events retain strict final-head evidence", () => {
   const head = "2849b391252aa8be7941320fa4c09d8d0e34ab43";
-  const transcript = `${event("/usr/bin/bash -lc 'git rev-parse HEAD'", head + "\n")}\n${event(`/usr/bin/bash -lc 'git show --format=fuller --stat ${head}'`, `commit ${head}\n`)}`;
+  const transcript = `${event("/usr/bin/bash -lc 'git rev-parse HEAD'", head + "\n")}\n${event(`/usr/bin/bash -lc 'git show --format=fuller --stat ${head}'`, `commit ${head}\n`)}\n${event(`/usr/bin/bash -lc '${checkoutDiffCommand("base", head)}'`, "diff --git a/a b/a\n+fix")}`;
   assert.equal(verifiedCheckoutEvidence(transcript, "base", head), true);
   assert.equal(verifiedCheckoutEvidence(transcript, "base", "stale"), false);
   assert.equal(
@@ -102,4 +109,36 @@ test("checkout diagnostics distinguish absent, failed and stale evidence without
   const bounded = checkoutExecutionDiagnostics(repeated, "base", null);
   assert.equal(bounded.commandEvents, 50);
   assert.equal(bounded.headIdentity.length, 8);
+});
+
+test("PR inspection requires the successful final patch read, not only metadata or prose", () => {
+  const metadata = [
+    event("git rev-parse HEAD", "final"),
+    event("git show --format=fuller --stat final", "commit final"),
+  ].join("\n");
+  const command = checkoutDiffCommand("base", "final");
+  assert.equal(verifiedCheckoutEvidence(metadata, "base", "final"), false);
+  for (const wrong of [
+    event(command, "patch", { exit_code: 1 }),
+    event(command, "patch", { status: "in_progress" }),
+    event(checkoutDiffCommand("stale-base", "final"), "patch"),
+    event(checkoutDiffCommand("base", "stale-head"), "patch"),
+    event(command + " || true", "patch"),
+    JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "I inspected the final patch" },
+    }),
+  ])
+    assert.equal(verifiedCheckoutEvidence(metadata + "\n" + wrong, "base", "final"), false);
+  const inspected = metadata + "\n" + event(command, "diff --git a/a b/a\n+fixed");
+  assert.equal(verifiedCheckoutEvidence(inspected, "base", "final"), true);
+  const diagnostic = checkoutExecutionDiagnostics(inspected, "base", "final");
+  assert.deepEqual(diagnostic.finalPatch, [
+    { status: "completed", exitCode: 0, matchesHead: true },
+  ]);
+  assert.doesNotMatch(JSON.stringify(diagnostic), /diff --git|fixed/);
+  const contract = checkoutInspectionContract("base", "final");
+  assert.match(contract, /JSON-only describes the final response/);
+  assert.match(contract, /Attempt the required calls/);
+  assert.ok(contract.includes(command));
 });

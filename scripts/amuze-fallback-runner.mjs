@@ -1850,8 +1850,8 @@ function latestExactHeadAgentVerdict(pr, comments = []) {
       /<!--\s*clawsweeper-verdict:(pass|needs-changes|needs-repair|needs-human|human-review)\b[^>]*\bsha=([a-f0-9]+)\b[^>]*-->/gi,
     )) {
       if (marker[2] !== pr.headRefOid) continue;
-      // Legacy comments claimed verified checkout access without execution evidence.
-      if (marker[1].toLowerCase() === "pass" && !/\bevidence=verified-v3\b/.test(marker[0]))
+      // Metadata-only v3 and older comments do not prove inspection of the final patch.
+      if (marker[1].toLowerCase() === "pass" && !/\bevidence=verified-v4\b/.test(marker[0]))
         continue;
       if (
         !verdict ||

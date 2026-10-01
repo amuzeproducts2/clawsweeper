@@ -1333,7 +1333,7 @@ function agentPass(sha = headSha) {
     body: [
       "SHIPRIGHT review passed.",
       "<!-- clawsweeper-review item=7 -->",
-      `<!-- clawsweeper-verdict:pass item=7 sha=${sha} confidence=high evidence=verified-v3 -->`,
+      `<!-- clawsweeper-verdict:pass item=7 sha=${sha} confidence=high evidence=verified-v4 -->`,
     ].join("\n"),
   };
 }
@@ -1489,7 +1489,7 @@ test("inspectPr finds verdict comment 101 and fails closed on malformed paginati
     body: [
       "SHIPRIGHT review passed.",
       "<!-- clawsweeper-review item=7 -->",
-      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high evidence=verified-v3 -->`,
+      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high evidence=verified-v4 -->`,
     ].join("\n"),
   };
   writeFileSync(
@@ -3100,7 +3100,13 @@ test("skipped and neutral Macroscope coverage never approve merge", () => {
   );
   assert.equal(
     latestExactHeadAgentVerdict(pr, [
-      { ...agentPass(), body: agentPass().body.replace(" evidence=verified-v3", "") },
+      { ...agentPass(), body: agentPass().body.replace(" evidence=verified-v4", "") },
+    ]),
+    null,
+  );
+  assert.equal(
+    latestExactHeadAgentVerdict(pr, [
+      { ...agentPass(), body: agentPass().body.replace("verified-v4", "verified-v3") },
     ]),
     null,
   );
