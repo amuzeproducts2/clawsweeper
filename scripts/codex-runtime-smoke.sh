@@ -6,7 +6,7 @@ STATE_DIR="${2:?usage: codex-runtime-smoke.sh RELEASE_ROOT STATE_DIR HEALTHCHECK
 HEALTHCHECK_METRICS_PATH="${3:?usage: codex-runtime-smoke.sh RELEASE_ROOT STATE_DIR HEALTHCHECK_METRICS_PATH}"
 CODEX_BIN="${CLAWSWEEPER_CODEX_BIN:-/usr/bin/codex}"
 EXPECTED="CLAWSWEEPER_CODEX_RUNTIME_OK"
-SANDBOX_CONFIG="features.use_legacy_landlock=true"
+SANDBOX_CONFIG="features.use_legacy_landlock=false"
 OUTPUT_PATH="${STATE_DIR}/codex-runtime-smoke.txt"
 LOG_PATH="${STATE_DIR}/codex-runtime-smoke.log"
 FAILED_LOG_PATH="${STATE_DIR}/codex-runtime-smoke.failed.log"
@@ -42,12 +42,12 @@ if ! env \
   -u GITHUB_TOKEN \
   -u OPENAI_API_KEY \
   -u CODEX_API_KEY \
-  "${CODEX_BIN}" sandbox linux \
-  -c "${SANDBOX_CONFIG}" \
+  "${CODEX_BIN}" -c 'sandbox_mode="workspace-write"' \
+  -c "${SANDBOX_CONFIG}" sandbox -- \
   /usr/bin/test -r /proc/sys/kernel/overflowuid \
   >"${LOG_PATH}" 2>&1; then
   preserve_failure_log
-  echo "Codex Landlock sandbox probe failed" >&2
+  echo "Codex bubblewrap sandbox probe failed" >&2
   exit 1
 fi
 

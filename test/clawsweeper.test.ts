@@ -14672,7 +14672,7 @@ process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_e
     assert.ok(args.includes("--ignore-user-config"));
     assert.ok(args.includes("--ephemeral"));
     for (const config of [
-      "features.use_legacy_landlock=true",
+      "features.use_legacy_landlock=false",
       "include_apps_instructions=false",
       "apps._default.enabled=false",
       "features.apps=false",
