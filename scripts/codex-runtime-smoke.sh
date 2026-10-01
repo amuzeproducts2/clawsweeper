@@ -43,7 +43,7 @@ if ! env \
   -u OPENAI_API_KEY \
   -u CODEX_API_KEY \
   "${CODEX_BIN}" -c 'sandbox_mode="workspace-write"' \
-  -c "${SANDBOX_CONFIG}" sandbox -- \
+  -c "${SANDBOX_CONFIG}" -C "${STATE_DIR}" sandbox -- \
   /usr/bin/test -r /proc/sys/kernel/overflowuid \
   >"${LOG_PATH}" 2>&1; then
   preserve_failure_log
@@ -65,7 +65,7 @@ if ! env \
   -c "${SANDBOX_CONFIG}" \
   -c 'web_search="disabled"' \
   --skip-git-repo-check \
-  -C "${RELEASE_ROOT}" \
+  -C "${STATE_DIR}" \
   --output-last-message "${OUTPUT_PATH}" \
   --sandbox read-only \
   "Reply with exactly ${EXPECTED} and nothing else." \

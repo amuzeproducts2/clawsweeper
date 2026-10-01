@@ -24,7 +24,9 @@ if [ "\${1:-}" = "-c" ]; then
   [ "$2" = 'sandbox_mode="workspace-write"' ]
   [ "$3" = "-c" ]
   [ "$4" = "features.use_legacy_landlock=false" ]
-  shift 4
+  [ "$5" = "-C" ]
+  [ "$6" = "${stateDir}" ]
+  shift 6
 fi
 case "\${1:-}" in
   sandbox)
@@ -55,6 +57,7 @@ case "\${1:-}" in
         --ignore-user-config) ignore_user_config=1 ;;
         --ignore-rules) ignore_rules=1 ;;
         --ephemeral) ephemeral=1 ;;
+        -C) [ "$2" = "${stateDir}" ]; shift 2; continue ;;
         -c)
           [ "$2" = "features.use_legacy_landlock=false" ] && landlock_config=1
           [ "$2" = 'web_search="disabled"' ] && web_search_disabled=1

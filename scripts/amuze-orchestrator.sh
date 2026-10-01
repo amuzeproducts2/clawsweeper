@@ -21,7 +21,7 @@ export CLAWSWEEPER_RUNTIME_STATE_DIR="${CLAWSWEEPER_RUNTIME_STATE_DIR:-${STATE_D
 export CLAWSWEEPER_RUNTIME_CONFIG_DIR="${CLAWSWEEPER_RUNTIME_CONFIG_DIR:-${STATE_DIR}/xdg-config}"
 export CLAWSWEEPER_RUNTIME_CACHE_DIR="${CLAWSWEEPER_RUNTIME_CACHE_DIR:-${STATE_DIR}/xdg-cache}"
 export CLAWSWEEPER_GIT_CONFIG_PATH="${CLAWSWEEPER_GIT_CONFIG_PATH:-${STATE_DIR}/gitconfig}"
-export CODEX_HOME="/root/.codex"
+export CODEX_HOME="${CODEX_HOME:-/root/.codex}"
 export CLAWSWEEPER_METRICS_PATH="${CLAWSWEEPER_METRICS_PATH:-/var/lib/node_exporter/textfile_collector/clawsweeper_orchestrator.prom}"
 export CLAWSWEEPER_HEALTHCHECK_METRICS_PATH="${CLAWSWEEPER_HEALTHCHECK_METRICS_PATH:-/var/lib/node_exporter/textfile_collector/clawsweeper_healthcheck.prom}"
 export CLAWSWEEPER_SECURITY_ALERTS_JSON="${CLAWSWEEPER_SECURITY_ALERTS_JSON:-/var/lib/node_exporter/textfile_collector/openclaw_github_watchdog.json}"
@@ -123,10 +123,11 @@ if ! command -v node >/dev/null 2>&1 || ! command -v gh >/dev/null 2>&1; then
 fi
 
 unset GH_TOKEN
-if [ -f "/root/.openclaw/credentials/github-jaywillingham.env" ]; then
+GITHUB_CREDENTIAL_FILE="${CLAWSWEEPER_GITHUB_CREDENTIAL_FILE:-/root/.openclaw/credentials/github-jaywillingham.env}"
+if [ -f "${GITHUB_CREDENTIAL_FILE}" ]; then
   set -a
   # shellcheck disable=SC1091
-  . "/root/.openclaw/credentials/github-jaywillingham.env"
+  . "${GITHUB_CREDENTIAL_FILE}"
   set +a
 fi
 if [ -n "${GITHUB_TOKEN:-}" ]; then
