@@ -53,3 +53,56 @@ export function verifiedCheckoutEvidence(
       ))
   );
 }
+
+// Persist only fixed labels, statuses, counts and booleans. Never retain arbitrary
+// commands, output, model messages, environment, or error text in this diagnostic.
+export function checkoutExecutionDiagnostics(
+  transcript: string,
+  baseSha: string,
+  headSha: string | null,
+) {
+  type Observation = { status: string; exitCode: number | null; matchesHead: boolean };
+  const identity: Observation[] = [];
+  const summary: Observation[] = [];
+  let commandEvents = 0;
+  let completedCommandEvents = 0;
+  let malformedLines = 0;
+  for (const line of transcript.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event?.item?.type !== "command_execution") continue;
+      commandEvents += 1;
+      if (event.type !== "item.completed") continue;
+      completedCommandEvents += 1;
+      const item = event.item;
+      if (typeof item.command !== "string") continue;
+      const output = typeof item.aggregated_output === "string" ? item.aggregated_output : "";
+      const status = ["completed", "failed", "in_progress"].includes(item.status)
+        ? item.status
+        : "unknown";
+      const exitCode = Number.isSafeInteger(item.exit_code) ? item.exit_code : null;
+      if (matchesExecutedCommand(item.command, "git rev-parse HEAD")) {
+        identity.push({ status, exitCode, matchesHead: output.trim() === (headSha ?? baseSha) });
+        if (identity.length > 8) identity.shift();
+      } else if (
+        headSha &&
+        matchesExecutedCommand(item.command, `git show --format=fuller --stat ${headSha}`)
+      ) {
+        summary.push({ status, exitCode, matchesHead: output.includes(headSha) });
+        if (summary.length > 8) summary.shift();
+      }
+    } catch {
+      malformedLines += 1;
+    }
+  }
+  return {
+    version: 1,
+    commandEvents,
+    completedCommandEvents,
+    malformedLines,
+    headIdentity: identity,
+    prHeadSummary: summary,
+    verified: verifiedCheckoutEvidence(transcript, baseSha, headSha),
+  };
+}

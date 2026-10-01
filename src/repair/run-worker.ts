@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { codexBinary } from "../codex-env.js";
 import type { JsonValue, LooseRecord } from "./json-types.js";
 import fs from "node:fs";
 import os from "node:os";
@@ -256,7 +257,7 @@ function spawnCodexWithHeartbeat({
     let timeoutError: Error | null = null;
     let bufferError: Error | null = null;
 
-    const child = spawn("codex", commandArgs, {
+    const child = spawn(codexBinary(), commandArgs, {
       cwd,
       env: codexEnv(),
       stdio: ["pipe", "pipe", "pipe"],

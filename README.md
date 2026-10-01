@@ -668,3 +668,16 @@ Target repository setup:
 - optionally set `CLAWSWEEPER_COMMIT_REVIEW_SETTLE_SECONDS=0` for manual
   backfills where the target commit range is already settled; the default is
   `60`
+
+
+The Amuze orchestrator uses `CLAWSWEEPER_CODEX_BIN` (default `/usr/bin/codex`)
+for its runtime smoke, review, repair, and sandbox regression commands. Other
+entrypoints keep normal `codex` lookup unless that variable is set. Configure
+this path only for an approved CLI installation; model, effort, approval policy,
+and sandbox flags remain explicit caller settings.
+
+Each review attempt writes a private `<number>.execution-diagnostics.json`
+beside its Codex result. It contains command-event counts and at most eight
+status/exit/head-match observations for each required checkout command. It
+retains no command text, output, model prose, credentials, or environment values.
+This diagnostic does not confer approval or replace exact-head execution proof.

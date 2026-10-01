@@ -16,6 +16,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { successfulCodexCommands, matchesExecutedCommand } from "../dist/codex-command-evidence.js";
 
+import { codexBinary } from "../dist/codex-env.js";
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const defaultOrg = "amuzeproducts2";
 const artifactRoot = resolve(
@@ -2595,7 +2597,7 @@ function verifyCommittedRepair(targetDir, headSha, evidence, timeoutMs, execute 
   if (!commands.length || commands.length > 3)
     throw new Error("Final repair regression command budget exceeded");
   const deadline = Date.now() + Math.min(timeoutMs, 120_000);
-  const sandboxHelp = execute("codex", ["sandbox", "--help"], {
+  const sandboxHelp = execute(codexBinary(), ["sandbox", "--help"], {
     cwd: targetDir,
     env: codexRepairEnv(),
     timeoutMs: Math.min(timeoutMs, 10_000),
@@ -2610,7 +2612,7 @@ function verifyCommittedRepair(targetDir, headSha, evidence, timeoutMs, execute 
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error("Final repair regression time budget exhausted");
     // Reuse the worker's workspace-write policy. Never run model-supplied tests unsandboxed.
-    const result = execute("codex", finalRegressionSandboxArgs(command, sandboxHelp.stdout), {
+    const result = execute(codexBinary(), finalRegressionSandboxArgs(command, sandboxHelp.stdout), {
       cwd: targetDir,
       env: codexRepairEnv(),
       timeoutMs: remaining,
@@ -3348,7 +3350,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
   const outputPath = join(repairDir, "codex-summary.md");
   writeFileSync(promptPath, prompt);
   const result = runBestEffort(
-    "codex",
+    codexBinary(),
     [
       "exec",
       "--json",

@@ -14613,7 +14613,7 @@ process.exit(1);
   }
 });
 
-test("runCodex isolates automated reviews from unrelated Codex surfaces", () => {
+test("runCodex honors explicit runtime path and isolates automated reviews", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
@@ -14622,7 +14622,9 @@ test("runCodex isolates automated reviews from unrelated Codex surfaces", () => 
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
   execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
-  const codexPath = join(binDir, "codex");
+  const codexPath = join(binDir, "configured-codex");
+  writeFileSync(join(binDir, "codex"), "#!/usr/bin/env node\nprocess.exit(99);\n");
+  chmodSync(join(binDir, "codex"), 0o755);
   writeFileSync(
     codexPath,
     `#!/usr/bin/env node
@@ -14636,11 +14638,13 @@ process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_e
   );
   chmodSync(codexPath, 0o755);
   const previous = {
+    CLAWSWEEPER_CODEX_BIN: process.env.CLAWSWEEPER_CODEX_BIN,
     PATH: process.env.PATH,
     CODEX_ARGS_PATH: process.env.CODEX_ARGS_PATH,
     CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
   };
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CLAWSWEEPER_CODEX_BIN = codexPath;
   process.env.CODEX_ARGS_PATH = argsPath;
   process.env.CODEX_DECISION_JSON = JSON.stringify(
     closeDecision({
@@ -14669,6 +14673,15 @@ process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_e
     });
 
     const args = JSON.parse(readFileSync(argsPath, "utf8")) as string[];
+    const diagnostic = JSON.parse(
+      readFileSync(join(workDir, "83395.execution-diagnostics.json"), "utf8"),
+    );
+    assert.equal(diagnostic.verified, true);
+    assert.equal(diagnostic.processExitCode, 0);
+    assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+    assert.ok(args.includes('approval_policy="never"'));
+    assert.ok(args.includes('model_reasoning_effort="high"'));
+    assert.equal(args[args.indexOf("--model") + 1], "gpt-test");
     assert.ok(args.includes("--ignore-user-config"));
     assert.ok(args.includes("--ephemeral"));
     for (const config of [
@@ -18674,6 +18687,12 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
   try {
     process.env.CODEX_FIXTURE_WRONG_HEAD = base;
     assert.throws(() => runCodexForTest(options), /missing successful checkout/);
+    const failureDiagnostic = JSON.parse(
+      readFileSync(join(options.workDir, "99.execution-diagnostics.json"), "utf8"),
+    );
+    assert.equal(failureDiagnostic.verified, false);
+    assert.equal(failureDiagnostic.headIdentity[0].matchesHead, false);
+    assert.equal(failureDiagnostic.prHeadSummary[0].matchesHead, true);
     process.env.CODEX_FIXTURE_FAIL_CLEANUP = "1";
     assert.throws(
       () => runCodexForTest(options),
