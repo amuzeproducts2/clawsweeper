@@ -5,6 +5,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -43,6 +44,7 @@ import {
 } from "./github-retry.js";
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
+import { verifiedCheckoutEvidence } from "./codex-command-evidence.js";
 import { runText } from "./command.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
@@ -409,6 +411,12 @@ interface ReviewCommentRenderOptions {
 }
 
 interface Decision {
+  executionEvidence?: {
+    version: 3;
+    baseSha: string;
+    headSha: string | null;
+    transcriptHash: string;
+  };
   decision: DecisionKind;
   closeReason: CloseReason;
   confidence: Confidence;
@@ -1894,11 +1902,12 @@ function evidenceEntry(options: Partial<Evidence> & Pick<Evidence, "label" | "de
 function run(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number | undefined } = {},
 ): string {
   return runText(command, args, {
     cwd: options.cwd ?? ROOT,
     env: options.env,
+    timeout: options.timeoutMs,
     maxBuffer: 128 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
     trim: "both",
@@ -6540,9 +6549,10 @@ class CodexReviewError extends Error {
   }
 }
 
-function openclawDirtyStatus(openclawDir: string): string {
+function openclawDirtyStatus(openclawDir: string, timeoutMs?: number): string {
   return run("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
     cwd: openclawDir,
+    timeoutMs,
     env: { GIT_OPTIONAL_LOCKS: "0" },
   });
 }
@@ -6592,7 +6602,88 @@ export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decisi
   return runCodex(options);
 }
 
-function runCodex(options: {
+function runCodex(options: Parameters<typeof runCodexInCheckout>[0]): Decision {
+  const headSha = pullHeadShaFromContext(options.context);
+  if (!headSha) return runCodexInCheckout(options);
+  const deadline = Date.now() + options.timeoutMs;
+  const cleanupReserveMs = Math.min(60_000, Math.max(1000, Math.floor(options.timeoutMs / 5)));
+  const remaining = () => Math.max(1, deadline - Date.now());
+  if (headSha) {
+    if (!/^[a-f0-9]{40}$/i.test(headSha)) throw new Error("PR review requires a full head SHA");
+    if (!Number.isSafeInteger(options.item.number) || options.item.number <= 0) {
+      throw new Error("PR review requires a positive integer item number");
+    }
+    const object = spawnSync("git", ["cat-file", "-e", `${headSha}^{commit}`], {
+      cwd: options.openclawDir,
+      encoding: "utf8",
+      timeout: remaining(),
+    });
+    if (object.error || object.status !== 0) {
+      const fetched = spawnSync(
+        "git",
+        ["fetch", "--depth", "1", "--", "origin", `refs/pull/${options.item.number}/head`],
+        {
+          cwd: options.openclawDir,
+          encoding: "utf8",
+          timeout: remaining(),
+        },
+      );
+      const identity = spawnSync("git", ["rev-parse", "FETCH_HEAD"], {
+        cwd: options.openclawDir,
+        encoding: "utf8",
+        timeout: remaining(),
+      });
+      if (
+        fetched.error ||
+        fetched.status !== 0 ||
+        identity.status !== 0 ||
+        identity.stdout.trim() !== headSha
+      ) {
+        throw new Error("Could not hydrate the exact PR head for independent shell review");
+      }
+    }
+  }
+  ensureDir(options.workDir);
+  const checkout = mkdtempSync(join(resolve(options.workDir), `${options.item.number}.checkout-`));
+  const added = spawnSync("git", ["worktree", "add", "--detach", "--", checkout, headSha], {
+    cwd: options.openclawDir,
+    encoding: "utf8",
+    timeout: remaining(),
+  });
+  if (added.error || added.status !== 0)
+    throw new Error("Could not prepare exact-head review checkout");
+  let decision: Decision | undefined;
+  let reviewError: unknown;
+  let reviewFailed = false;
+  let cleanupFailed = false;
+  try {
+    if (remaining() <= cleanupReserveMs)
+      throw new Error("Exact-head review deadline exhausted before Codex execution");
+    decision = runCodexInCheckout({
+      ...options,
+      openclawDir: checkout,
+      timeoutMs: remaining() - cleanupReserveMs,
+    });
+  } catch (error) {
+    reviewFailed = true;
+    reviewError = error;
+  } finally {
+    const removed = spawnSync("git", ["worktree", "remove", "--force", "--", checkout], {
+      cwd: options.openclawDir,
+      encoding: "utf8",
+      timeout: remaining(),
+    });
+    cleanupFailed = Boolean(removed.error || removed.status !== 0);
+  }
+  if (reviewFailed && cleanupFailed)
+    throw new Error("Exact-head review and checkout cleanup both failed", { cause: reviewError });
+  if (reviewFailed) throw reviewError;
+  if (cleanupFailed || !decision)
+    throw new Error("Exact-head review checkout cleanup failed; refusing to accept review");
+  return decision;
+}
+
+function runCodexInCheckout(options: {
   item: Item;
   context: ItemContext;
   git: GitInfo;
@@ -6607,6 +6698,16 @@ function runCodex(options: {
   proofScratchDir?: string;
   prompt?: string;
 }): Decision {
+  const startedAt = Date.now();
+  const remainingReviewMs = () => {
+    const remaining = options.timeoutMs - (Date.now() - startedAt);
+    if (remaining <= 0)
+      throw new Error(
+        `Codex review timed out for #${options.item.number} after ${options.timeoutMs}ms.`,
+      );
+    return remaining;
+  };
+  const statusReserveMs = Math.min(10_000, Math.max(100, Math.floor(options.timeoutMs / 5)));
   ensureDir(options.workDir);
   const proofScratchDir =
     options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
@@ -6616,7 +6717,7 @@ function runCodex(options: {
     : prepareMediaProofArtifacts(options.context, proofScratchDir);
   const promptPath = join(options.workDir, `${options.item.number}.prompt.md`);
   const outputPath = join(options.workDir, `${options.item.number}.json`);
-  const prompt =
+  const reviewPrompt =
     options.prompt ??
     buildReviewPrompt(
       options.item,
@@ -6625,8 +6726,21 @@ function runCodex(options: {
       options.additionalPrompt,
       mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
     ).text;
+  const headSha = pullHeadShaFromContext(options.context);
+  const prompt = [
+    ...(headSha
+      ? [
+          `This checkout is the detached PR head ${headSha}. The base/main commit is ${options.git.mainSha}; use git show at that base SHA for comparisons rather than treating this checkout as main.`,
+        ]
+      : []),
+    "Before reviewing, run these exact shell commands separately. Their successful tool events are required as checkout evidence:",
+    "git rev-parse HEAD",
+    ...(headSha ? [`git show --format=fuller --stat ${headSha}`] : []),
+    "If either fails, report the access failure; never infer approval from supplied context alone.",
+    reviewPrompt,
+  ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
-  const dirtyBefore = openclawDirtyStatus(options.openclawDir);
+  const dirtyBefore = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
   if (dirtyBefore) {
     throw new Error(
       `OpenClaw checkout is dirty before reviewing #${options.item.number}:\n${dirtyBefore}`,
@@ -6662,10 +6776,9 @@ function runCodex(options: {
     5,
     Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
   );
-  const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (existsSync(outputPath)) unlinkSync(outputPath);
-    const remainingMs = options.timeoutMs - (Date.now() - startedAt);
+    const remainingMs = remainingReviewMs() - statusReserveMs;
     if (remainingMs <= 0) {
       throw new Error(
         `Codex review timed out for #${options.item.number} after ${options.timeoutMs}ms.`,
@@ -6675,6 +6788,7 @@ function runCodex(options: {
       "codex",
       [
         "exec",
+        "--json",
         ...(modelArgs.length > 0 ? ["--ignore-user-config"] : []),
         "--ephemeral",
         ...modelArgs,
@@ -6703,12 +6817,13 @@ function runCodex(options: {
         timeout: remainingMs,
       },
     );
-    const dirtyAfter = openclawDirtyStatus(options.openclawDir);
+    const dirtyAfter = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
     if (dirtyAfter) {
       throw new Error(
         `Codex dirtied the OpenClaw checkout while reviewing #${options.item.number}:\n${dirtyAfter}`,
       );
     }
+    remainingReviewMs();
     const stderr = redactedOutputTail(result.stderr);
     const stdout = redactedOutputTail(result.stdout);
     let failureDetail = "";
@@ -6716,19 +6831,25 @@ function runCodex(options: {
       failureDetail = `Codex review failed for #${options.item.number}: ${redactInternalCodexModel(result.error.message)}`;
     }
     const hasOutput = existsSync(outputPath);
-    if (!result.error && hasOutput) {
+    if (!result.error && result.status === 0 && hasOutput) {
       try {
         const decision = parseDecision(
           JSON.parse(readFileSync(outputPath, "utf8").trim()),
           options.item,
         );
-        if (result.status !== 0) {
-          console.error(
-            `[review] ${new Date().toISOString()} codex-exit-nonzero-output-accepted #${
-              options.item.number
-            } status=${result.status ?? "unknown"} stderr=${JSON.stringify(stderr)}`,
-          );
+        if (!verifiedCheckoutEvidence(result.stdout ?? "", options.git.mainSha, headSha)) {
+          throw new Error("missing successful checkout/PR-head shell evidence");
         }
+        decision.executionEvidence = {
+          version: 3,
+          baseSha: options.git.mainSha,
+          headSha,
+          transcriptHash: sha256(result.stdout ?? ""),
+        };
+        writeFileSync(
+          join(options.workDir, `${options.item.number}.execution.json`),
+          JSON.stringify(decision.executionEvidence, null, 2),
+        );
         return decision;
       } catch (error) {
         failureDetail = `Codex review failed for #${options.item.number} with exit ${
@@ -13865,6 +13986,14 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
+    ...(frontMatterValue(markdown, "requires_product_decision") === "true"
+      ? ["escalation=business"]
+      : []),
+    ...(frontMatterValue(markdown, "review_execution_version") === "3" &&
+    frontMatterValue(markdown, "local_review_head_sha") === headSha &&
+    hasVerifiedLocalCheckoutAccess(markdown)
+      ? ["evidence=verified-v3"]
+      : []),
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
   const humanReviewMarkers = (): string => {
@@ -13955,7 +14084,9 @@ function repairLoopFindingRepairAllowed(markdown: string): boolean {
 function isRepairLoopPassReport(markdown: string): boolean {
   const labels = frontMatterStringArray(markdown, "labels");
   return (
-    (labels.includes(AUTOMERGE_LABEL) || labels.includes(AUTOFIX_LABEL)) &&
+    (labels.includes(AUTOMERGE_LABEL) ||
+      labels.includes(AUTOFIX_LABEL) ||
+      frontMatterValue(markdown, "autonomous_pr_review") === "true") &&
     frontMatterValue(markdown, "review_status") === "complete" &&
     frontMatterValue(markdown, "confidence") === "high" &&
     frontMatterValue(markdown, "decision") === "keep_open" &&
@@ -14652,7 +14783,11 @@ review_context_elapsed_ms: ${reviewTelemetryNumber(options.runtime.contextElapse
 review_codex_elapsed_ms: ${reviewTelemetryNumber(options.runtime.codexElapsedMs)}
 review_mode: ${options.reviewMode}
 review_status: ${options.decision.summary.startsWith("Codex review failed") ? "failed" : "complete"}
-local_checkout_access: verified
+autonomous_pr_review: ${process.env.CLAWSWEEPER_AMUZE_AUTONOMOUS_REVIEW === "1"}
+local_checkout_access: ${options.decision.executionEvidence ? "verified" : "unverified"}
+review_execution_version: ${options.decision.executionEvidence?.version ?? "unknown"}
+local_review_head_sha: ${options.decision.executionEvidence?.headSha ?? "unknown"}
+review_transcript_sha256: ${options.decision.executionEvidence?.transcriptHash ?? "unknown"}
 item_snapshot_hash: ${options.snapshotHash}
 close_comment_sha256: ${options.action.closeComment ? sha256(options.action.closeComment) : "none"}
 review_comment_sha256: none

@@ -1,0 +1,79 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["headSha", "outcome", "escalation", "summary", "validations", "adjudications"],
+  "properties": {
+    "headSha": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["repaired", "adjudicated", "blocked"]
+    },
+    "escalation": {
+      "type": ["string", "null"],
+      "enum": [null, "business", "permission"]
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1
+    },
+    "validations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["command", "exitCode", "kind"],
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "exitCode": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": ["regression", "required"]
+          }
+        }
+      }
+    },
+    "adjudications": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["threadId", "disposition", "rationale", "evidence", "regressionCommand"],
+        "properties": {
+          "threadId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": ["fixed", "false-positive"]
+          },
+          "rationale": {
+            "type": "string",
+            "minLength": 1
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "regressionCommand": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

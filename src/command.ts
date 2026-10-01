@@ -4,6 +4,7 @@ export type RunTextOptions = {
   cwd?: string | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   maxBuffer?: number;
+  timeout?: number | undefined;
   stdio?: ["ignore", "pipe", "pipe"] | ["ignore", "pipe", "ignore"];
   trim?: "both" | "end" | "none";
 };
@@ -14,6 +15,7 @@ export function runText(
   {
     cwd,
     env,
+    timeout,
     maxBuffer = 64 * 1024 * 1024,
     stdio = ["ignore", "pipe", "pipe"],
     trim = "end",
@@ -25,6 +27,7 @@ export function runText(
     encoding: "utf8",
     env: { ...process.env, GIT_OPTIONAL_LOCKS: "0", ...env },
     maxBuffer,
+    timeout,
     stdio,
   });
   if (trim === "both") return text.trim();

@@ -18,6 +18,15 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   actionableReviewThreads,
+  verifyCommittedRepair,
+  finalRegressionSandboxArgs,
+  reviewedStateTracksHead,
+  threadResolutionOutcome,
+  statusConsumesAction,
+  allRequiredSignalsGreen,
+  validationChecks,
+  adjudicatedThreadsForHead,
+  parseRepairEvidence,
   agentRepairReadiness,
   autoMergeDependabotBlocker,
   autoMergeMacroscopeLowRiskBlocker,
@@ -81,7 +90,7 @@ test("Prometheus textfiles remain readable under the production-restrictive umas
   assert.equal(statSync(path).mode & 0o777, 0o644);
 });
 
-test("a completed deterministic fallback quiesces the unchanged head and evidence", () => {
+test("a deterministic fallback preserves agent-owned recovery", () => {
   const inspection = {
     pr: {
       headRefOid: headSha,
@@ -96,8 +105,8 @@ test("a completed deterministic fallback quiesces the unchanged head and evidenc
     action: "posted",
     headSha,
   });
-  assert.equal(state.verdict, "needs-human");
-  assert.equal(reviewStateIsCurrent(state, inspection), true);
+  assert.equal(state.verdict, "needs-repair");
+  assert.equal(reviewStateIsCurrent(state, inspection), false);
   assert.equal(
     completedFallbackReviewState(
       {
@@ -1302,7 +1311,10 @@ function pullRequest(overrides = {}) {
 }
 
 function passingChecks() {
-  return [{ name: "CI", state: "SUCCESS", bucket: "pass" }];
+  return [
+    { name: "CI", state: "SUCCESS", bucket: "pass" },
+    { name: "Macroscope correctness", state: "SUCCESS", bucket: "pass" },
+  ];
 }
 
 function agentPass(sha = headSha) {
@@ -1312,7 +1324,7 @@ function agentPass(sha = headSha) {
     body: [
       "SHIPRIGHT review passed.",
       "<!-- clawsweeper-review item=7 -->",
-      `<!-- clawsweeper-verdict:pass item=7 sha=${sha} confidence=high -->`,
+      `<!-- clawsweeper-verdict:pass item=7 sha=${sha} confidence=high evidence=verified-v3 -->`,
     ].join("\n"),
   };
 }
@@ -1332,7 +1344,7 @@ function activeThread(overrides = {}) {
   };
 }
 
-test("review thread classification excludes resolved and outdated threads", () => {
+test("review thread classification retains unresolved outdated findings", () => {
   const threads = [
     activeThread(),
     activeThread({ id: "PRRT_old", isOutdated: true }),
@@ -1340,7 +1352,7 @@ test("review thread classification excludes resolved and outdated threads", () =
   ];
   assert.deepEqual(
     actionableReviewThreads(threads).map((thread) => thread.id),
-    ["PRRT_active"],
+    ["PRRT_active", "PRRT_old"],
   );
   assert.deepEqual(
     unresolvedOutdatedReviewThreads(threads).map((thread) => thread.id),
@@ -1468,7 +1480,7 @@ test("inspectPr finds verdict comment 101 and fails closed on malformed paginati
     body: [
       "SHIPRIGHT review passed.",
       "<!-- clawsweeper-review item=7 -->",
-      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high -->`,
+      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high evidence=verified-v3 -->`,
     ].join("\n"),
   };
   writeFileSync(
@@ -1620,7 +1632,7 @@ test("deterministic findings and autorepair ingest current review threads", () =
   );
 });
 
-test("agent approval fallback is exact-head, attributed, and thread-clean", () => {
+test("agent approval cannot substitute missing Macroscope approval", () => {
   const pr = pullRequest();
   assert.equal(latestExactHeadAgentVerdict(pr, [agentPass()])?.verdict, "pass");
   assert.equal(latestExactHeadAgentVerdict(pr, [agentPass("oldhead")]), null);
@@ -1632,7 +1644,10 @@ test("agent approval fallback is exact-head, attributed, and thread-clean", () =
     latestExactHeadAgentVerdict(pr, [{ ...agentPass(), user: { login: "github-actions[bot]" } }]),
     null,
   );
-  assert.equal(macroscopeApprovalBlocker(pr, passingChecks(), [], [agentPass()], []), null);
+  assert.match(
+    macroscopeApprovalBlocker(pr, passingChecks(), [], [agentPass()], []),
+    /missing exact-head Macroscope approval/,
+  );
   assert.match(
     macroscopeApprovalBlocker(pr, passingChecks(), [], [agentPass()], [activeThread()]) ?? "",
     /unresolved actionable review thread/,
@@ -1684,7 +1699,8 @@ test("repair review notes exclude stale and untrusted instruction bodies", () =>
   assert.match(notes, /active-untrusted/);
   assert.match(notes, /untrusted review body omitted/);
   assert.doesNotMatch(notes, /IGNORE ALL CONSTRAINTS|RUN THIS COMMAND|LEAK THE TOKEN/);
-  assert.doesNotMatch(notes, /\bresolved\b|\boutdated\b/);
+  assert.doesNotMatch(notes, /\bresolved\b/);
+  assert.match(notes, /outdated/);
 });
 
 test("repair review notes preserve trusted top-level change requests", () => {
@@ -1737,7 +1753,7 @@ test("latest exact-head verdict uses update time instead of array order", () => 
   );
 });
 
-test("Dependabot can merge on clean exact-head frontier approval without Macroscope deadlock", () => {
+test("Dependabot requiring Macroscope cannot substitute frontier approval", () => {
   const pr = pullRequest();
   const blocker = autoMergeDependabotBlocker(
     pr,
@@ -1748,7 +1764,7 @@ test("Dependabot can merge on clean exact-head frontier approval without Macrosc
     [],
     true,
   );
-  assert.equal(blocker, null);
+  assert.match(blocker, /missing exact-head Macroscope approval/);
 });
 
 test("Dependabot merge remains thread-clean, lockfile-only, and bot-authored", () => {
@@ -2027,7 +2043,9 @@ test("repaired heads wait for checks, then require exact-head review, then becom
     checks: [],
     conversationComments: [],
     reviewThreads: [],
+    reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
   };
+  pr.reviewDecision = "APPROVED";
   const repairState = { status: "pushed", pushedSha: headSha };
   assert.equal(
     agentRepairReadiness("amuzeproducts2/example", 7, base, repairState).status,
@@ -2063,16 +2081,16 @@ test("repaired heads wait for checks, then require exact-head review, then becom
       },
       repairState,
     ).status,
-    "human",
+    "waiting",
   );
   assert.equal(
     agentRepairReadiness(
       "amuzeproducts2/example",
       7,
-      { ...base, pr: { ...pr, reviewDecision: "CHANGES_REQUESTED" } },
+      { ...base, checks: passingChecks(), pr: { ...pr, reviewDecision: "CHANGES_REQUESTED" } },
       repairState,
     ).status,
-    "human",
+    "repair",
   );
   const pausedState = {
     status: "paused",
@@ -3049,4 +3067,441 @@ test("Prometheus metrics expose outcome health instead of exit status alone", ()
     },
   );
   assert.equal(lint.status, 0, lint.stderr || lint.stdout);
+});
+
+test("skipped and neutral Macroscope coverage never approve merge", () => {
+  const pr = pullRequest({ reviewDecision: "APPROVED" });
+  const reviews = [
+    { user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha },
+  ];
+  for (const state of ["SKIPPED", "NEUTRAL"]) {
+    const checks = [
+      { name: "CI", state: "SUCCESS", bucket: "pass" },
+      { name: "Macroscope correctness", state, bucket: "skipping" },
+    ];
+    assert.equal(allRequiredSignalsGreen(checks), false);
+    assert.match(
+      macroscopeApprovalBlocker(pr, checks, reviews, [agentPass()], []),
+      /coverage incomplete/,
+    );
+  }
+  assert.match(
+    macroscopeApprovalBlocker(pr, [{ name: "CI", bucket: "pass" }], reviews),
+    /missing.*correctness/,
+  );
+  assert.equal(
+    latestExactHeadAgentVerdict(pr, [
+      { ...agentPass(), body: agentPass().body.replace(" evidence=verified-v3", "") },
+    ]),
+    null,
+  );
+});
+
+function repairEvidence(overrides = {}) {
+  return {
+    headSha,
+    outcome: "adjudicated",
+    escalation: null,
+    summary: "Finding disproved by regression.",
+    validations: [{ command: "pnpm test", exitCode: 0, kind: "regression" }],
+    adjudications: [
+      {
+        threadId: "PRRT_active",
+        disposition: "false-positive",
+        rationale: "The failure path is handled.",
+        evidence: ["src/worker.ts:12 handles the retry; test/retry.ts verifies the boundary."],
+        regressionCommand: "pnpm test",
+      },
+    ],
+    ...overrides,
+  };
+}
+function validationTranscript(exitCode = 0, command = "pnpm test") {
+  return JSON.stringify({
+    type: "item.completed",
+    item: {
+      type: "command_execution",
+      status: "completed",
+      exit_code: exitCode,
+      command,
+      aggregated_output: "regression passed",
+    },
+  });
+}
+
+test("finding adjudication requires exact-head, concrete disposition, and actual regression execution", () => {
+  const thread = activeThread({ isOutdated: true });
+  const evidence = parseRepairEvidence(repairEvidence(), headSha, [thread], validationTranscript());
+  const state = { evidenceHeadSha: headSha, adjudications: evidence.adjudications };
+  assert.equal(adjudicatedThreadsForHead(state, headSha, [thread]).length, 1);
+  assert.equal(adjudicatedThreadsForHead(state, "advanced-head", [thread]).length, 0);
+  assert.equal(
+    adjudicatedThreadsForHead(state, headSha, [
+      activeThread({ comments: { nodes: [{ body: "New finding" }] } }),
+    ]).length,
+    0,
+  );
+  assert.throws(
+    () => parseRepairEvidence(repairEvidence(), "other", [thread], validationTranscript()),
+    /exact-head/,
+  );
+  assert.throws(
+    () => parseRepairEvidence(repairEvidence(), headSha, [thread], validationTranscript(1)),
+    /successful tool/,
+  );
+  assert.throws(
+    () =>
+      parseRepairEvidence(
+        repairEvidence(),
+        headSha,
+        [thread],
+        validationTranscript(0, "echo pnpm test"),
+      ),
+    /successful tool/,
+  );
+  assert.throws(
+    () =>
+      parseRepairEvidence(
+        repairEvidence({ adjudications: [] }),
+        headSha,
+        [thread],
+        validationTranscript(),
+      ),
+    /every unresolved/,
+  );
+  assert.throws(
+    () =>
+      parseRepairEvidence(
+        repairEvidence({ validations: [] }),
+        headSha,
+        [thread],
+        validationTranscript(),
+      ),
+    /regression/,
+  );
+});
+
+test("adjudicated outdated findings still need both fresh reviews and green final-head checks", () => {
+  const thread = activeThread({ isOutdated: true });
+  const evidence = parseRepairEvidence(repairEvidence(), headSha, [thread], validationTranscript());
+  const state = {
+    status: "adjudicated",
+    headSha,
+    evidenceHeadSha: headSha,
+    adjudications: evidence.adjudications,
+  };
+  const inspection = {
+    pr: pullRequest({
+      reviewDecision: "APPROVED",
+      files: [{ path: "src/worker.ts", additions: 1, deletions: 1 }],
+    }),
+    checks: passingChecks(),
+    stats: { files: 1, additions: 1, deletions: 1 },
+    reviewThreads: [thread],
+    conversationComments: [agentPass()],
+    reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+  };
+  assert.equal(
+    agentRepairReadiness("amuzeproducts2/example", 7, inspection, state).status,
+    "resolve",
+  );
+  assert.equal(
+    agentRepairReadiness("amuzeproducts2/example", 7, { ...inspection, reviews: [] }, state).status,
+    "resolve",
+  );
+  assert.equal(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, conversationComments: [agentPass("old")] },
+      state,
+    ).status,
+    "review",
+  );
+});
+
+test("clean routine reviews have an explicit lane and cannot fabricate a pushed repair", () => {
+  const state = { status: "reviewed", reviewedSha: headSha };
+  assert.equal(repairStateTracksHead(state, headSha), false);
+  assert.equal(reviewedStateTracksHead(state, headSha), true);
+  assert.equal(reviewedStateTracksHead(state, "other-head"), false);
+  const inspection = {
+    pr: pullRequest({ reviewDecision: "APPROVED", files: [{ path: "src/worker.ts" }] }),
+    stats: { files: 1, additions: 1, deletions: 1 },
+    checks: passingChecks(),
+    reviewThreads: [],
+    conversationComments: [agentPass()],
+    reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+  };
+  assert.equal(
+    agentRepairReadiness("amuzeproducts2/example", 7, inspection, state).status,
+    "ineligible",
+  );
+  assert.equal(
+    agentRepairReadiness("amuzeproducts2/example", 7, inspection, state, "routine").status,
+    "ready",
+  );
+  assert.equal(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, reviews: [] },
+      state,
+      "routine",
+    ).status,
+    "waiting",
+  );
+  assert.equal(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, pr: { ...inspection.pr, files: [{ path: ".github/workflows/ci.yml" }] } },
+      state,
+      "routine",
+    ).status,
+    "human",
+  );
+  assert.equal(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, checks: [{ name: "CI", state: "FAILURE", bucket: "fail" }] },
+      state,
+      "routine",
+    ).status,
+    "repair",
+  );
+});
+
+test("resolution failures preserve process, permission, API and parsing diagnoses", () => {
+  const success = JSON.stringify({
+    data: { resolvePullRequestReviewThread: { thread: { isResolved: true } } },
+  });
+  assert.equal(threadResolutionOutcome({ status: 0, stdout: success }, "thread"), null);
+  assert.equal(
+    threadResolutionOutcome({ error: { message: "spawnSync gh EPERM" }, status: null }, "thread")
+      .family,
+    "permission",
+  );
+  assert.equal(
+    threadResolutionOutcome({ status: 1, stderr: "HTTP 403: denied", stdout: success }, "thread")
+      .family,
+    "permission",
+  );
+  assert.equal(
+    threadResolutionOutcome({ status: 1, stderr: "transport reset", stdout: success }, "thread")
+      .family,
+    "command_failure",
+  );
+  assert.equal(
+    threadResolutionOutcome({ status: 0, stdout: "invalid" }, "thread").family,
+    "invalid_json",
+  );
+  assert.equal(
+    threadResolutionOutcome(
+      { status: 0, stdout: JSON.stringify({ errors: [{ message: "not resolved" }] }) },
+      "thread",
+    ).family,
+    "api_response",
+  );
+  assert.equal(statusConsumesAction("agent_review_retry_exhausted"), false);
+  assert.equal(statusConsumesAction("agent_review_synced"), true);
+});
+
+test("repair evidence is revalidated on the committed final head before it can be published", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-final-regression-"));
+  const git = (...args) => {
+    const result = spawnSync("git", args, { cwd: root, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  git("init");
+  git("config", "user.name", "fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  writeFileSync(join(root, "fixture.txt"), "committed");
+  git("add", ".");
+  git("commit", "-m", "fixture");
+  const head = git("rev-parse", "HEAD");
+  const evidence = {
+    headSha: "prior-head",
+    validations: [
+      { command: 'node -e \'if (!require("node:fs").existsSync("fixture.txt")) process.exit(1)\'' },
+    ],
+    adjudications: [],
+  };
+  const sandboxFixture = (program, args, options) => {
+    assert.equal(program, "codex");
+    if (args.includes("--help"))
+      return { status: 0, stdout: "--sandbox-state-json --permission-profile" };
+    assert.ok(args.includes('sandbox_mode="workspace-write"'));
+    assert.ok(args.includes("features.use_legacy_landlock=true"));
+    const separator = args.indexOf("--");
+    return spawnSync(args[separator + 1], args.slice(separator + 2), {
+      ...options,
+      encoding: "utf8",
+      timeout: options.timeoutMs,
+    });
+  };
+  const verified = verifyCommittedRepair(root, head, evidence, 10_000, sandboxFixture);
+  assert.equal(verified.headSha, head);
+  assert.equal(verified.validations[0].headSha, head);
+  assert.throws(
+    () => verifyCommittedRepair(root, "other", evidence, 10_000, sandboxFixture),
+    /head changed/,
+  );
+  assert.throws(
+    () =>
+      verifyCommittedRepair(
+        root,
+        head,
+        { ...evidence, validations: [{ command: "node -e 'process.exit(1)'" }] },
+        10_000,
+        sandboxFixture,
+      ),
+    /regression failed/,
+  );
+  assert.throws(
+    () =>
+      verifyCommittedRepair(
+        root,
+        head,
+        {
+          ...evidence,
+          validations: [
+            { command: 'node -e \'require("node:fs").writeFileSync("fixture.txt","changed")\'' },
+          ],
+        },
+        10_000,
+        sandboxFixture,
+      ),
+    /changed the committed/,
+  );
+});
+
+test("final regression execution stays in the existing sandbox and fails closed on unknown CLI shape", () => {
+  assert.ok(
+    finalRegressionSandboxArgs("pnpm test", "  linux  Run in Linux sandbox").includes("linux"),
+  );
+  assert.equal(
+    finalRegressionSandboxArgs("pnpm test", "--sandbox-state-json --permission-profile").includes(
+      "linux",
+    ),
+    false,
+  );
+  assert.throws(() => finalRegressionSandboxArgs("pnpm test", "unknown"), /unverified/);
+});
+
+test("paused and adjudicated heads cannot be shadowed by an older pushed SHA", () => {
+  assert.equal(
+    repairStateTracksHead(
+      { status: "paused", headSha, pausedSha: headSha, pushedSha: "older" },
+      headSha,
+    ),
+    true,
+  );
+  assert.equal(
+    repairStateTracksHead(
+      { status: "adjudicated", headSha, evidenceHeadSha: headSha, pushedSha: "older" },
+      headSha,
+    ),
+    true,
+  );
+  assert.equal(
+    repairStateTracksHead({ status: "pushed", headSha, pushedSha: "older" }, headSha),
+    false,
+  );
+  assert.equal(statusConsumesAction("repair_merge_retry"), false);
+});
+
+test("required lint and build validation are allowed while adjudications still need a regression", () => {
+  const evidence = repairEvidence();
+  evidence.validations.push(
+    { command: "pnpm run lint", exitCode: 0, kind: "required" },
+    { command: "pnpm run build", exitCode: 0, kind: "required" },
+  );
+  const transcript = [
+    validationTranscript(),
+    validationTranscript(0, "pnpm run lint"),
+    validationTranscript(0, "pnpm run build"),
+  ].join("\n");
+  assert.equal(
+    parseRepairEvidence(evidence, headSha, [activeThread()], transcript).validations.length,
+    3,
+  );
+  assert.throws(
+    () =>
+      parseRepairEvidence(
+        {
+          ...evidence,
+          adjudications: [{ ...evidence.adjudications[0], regressionCommand: "pnpm run lint" }],
+        },
+        headSha,
+        [activeThread()],
+        transcript,
+      ),
+    /regression validation/,
+  );
+});
+
+test("explicit security-sensitive review markers preserve permission escalation", () => {
+  const pr = pullRequest();
+  const ordinary = {
+    ...agentPass(),
+    body: agentPass().body.replace("verdict:pass", "verdict:needs-human"),
+  };
+  assert.equal(latestExactHeadAgentVerdict(pr, [ordinary]).escalation, null);
+  const security = {
+    ...ordinary,
+    body:
+      ordinary.body + `\n<!-- clawsweeper-security:security-sensitive item=7 sha=${headSha} -->`,
+  };
+  assert.equal(latestExactHeadAgentVerdict(pr, [security]).escalation, "permission");
+});
+
+test("the post-fallback fingerprint preserves the two-session budget after the agent's own comment changes", () => {
+  const before = {
+    pr: pullRequest(),
+    checks: passingChecks(),
+    conversationComments: [],
+    reviews: [],
+    reviewThreads: [],
+  };
+  const after = {
+    ...before,
+    conversationComments: [
+      { ...agentPass(), body: agentPass().body.replace("verdict:pass", "verdict:needs-human") },
+    ],
+  };
+  const beforeFingerprint = mergeSignalFingerprint(before);
+  const afterFingerprint = mergeSignalFingerprint(after);
+  assert.notEqual(beforeFingerprint, afterFingerprint);
+  const state = {
+    headSha,
+    attempts: 2,
+    attemptFingerprint: beforeFingerprint,
+    ...completedFallbackReviewState(after, { action: "patched", headSha }),
+  };
+  assert.equal(state.attemptFingerprint, afterFingerprint);
+  assert.equal(state.attempts, 2);
+  assert.equal(state.status, "agent_owned");
+});
+
+test("only the identified activity notification is excluded from code validation", () => {
+  const ci = { name: "CI", bucket: "pass", state: "SUCCESS" };
+  const notify = {
+    name: "notify",
+    workflow: "github activity to openclaw",
+    bucket: "fail",
+    state: "CANCELLED",
+  };
+  assert.deepEqual(validationChecks([ci, notify]), [ci]);
+  assert.equal(allRequiredSignalsGreen(validationChecks([ci, notify])), true);
+  assert.equal(allRequiredSignalsGreen(validationChecks([notify])), false);
+  for (const check of [
+    { ...notify, workflow: "CI" },
+    { ...notify, workflow: undefined },
+    { ...notify, name: "test" },
+    { name: "Macroscope correctness", state: "SKIPPED", bucket: "skipping" },
+  ])
+    assert.equal(allRequiredSignalsGreen(validationChecks([ci, check])), false);
 });

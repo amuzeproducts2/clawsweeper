@@ -14550,7 +14550,7 @@ test("runtime budget only trips after a positive elapsed limit", () => {
   assert.equal(runtimeBudgetExceeded(1000, 5000, 6000), true);
 });
 
-test("runCodex accepts valid structured output after non-zero Codex exit", () => {
+test("runCodex rejects valid structured output after non-zero Codex exit", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
@@ -14566,6 +14566,7 @@ const fs = require("node:fs");
 const outputIndex = process.argv.indexOf("--output-last-message");
 if (outputIndex === -1) process.exit(2);
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 process.stderr.write("wrote structured output before shutdown failure\\n");
 process.exit(1);
 `,
@@ -14586,22 +14587,23 @@ process.exit(1);
     }),
   );
   try {
-    const decision = runCodexForTest({
-      item: item({ number: 83393 }),
-      context: { issue: {}, comments: [], timeline: [] },
-      git: { mainSha: "abc123", latestRelease: null },
-      model: "gpt-test",
-      openclawDir,
-      reasoningEffort: "high",
-      sandboxMode: "read-only",
-      serviceTier: "",
-      timeoutMs: 10_000,
-      workDir,
-      prompt: "Return a review decision.",
-    });
-
-    assert.equal(decision.decision, "keep_open");
-    assert.equal(decision.summary, "Keep open for maintainer follow-up.");
+    assert.throws(
+      () =>
+        runCodexForTest({
+          item: item({ number: 83393 }),
+          context: { issue: {}, comments: [], timeline: [] },
+          git: { mainSha: "abc123", latestRelease: null },
+          model: "gpt-test",
+          openclawDir,
+          reasoningEffort: "high",
+          sandboxMode: "read-only",
+          serviceTier: "",
+          timeoutMs: 10_000,
+          workDir,
+          prompt: "Return a review decision.",
+        }),
+      /exit 1/,
+    );
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
@@ -14629,6 +14631,7 @@ fs.writeFileSync(process.env.CODEX_ARGS_PATH, JSON.stringify(process.argv.slice(
 const outputIndex = process.argv.indexOf("--output-last-message");
 if (outputIndex === -1) process.exit(2);
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 `,
   );
   chmodSync(codexPath, 0o755);
@@ -14808,6 +14811,7 @@ if (attempt === 1) {
 }
 const outputIndex = process.argv.indexOf("--output-last-message");
 fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command:"git rev-parse HEAD",aggregated_output:"abc123"}})+"\\n");
 `,
   );
   chmodSync(codexPath, 0o755);
@@ -18581,5 +18585,131 @@ test("scheduled workflow jobs fail closed on forks without an explicit opt-in", 
       workflow.slice(jobStart, runsOn),
       new RegExp(scheduleGuard.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     );
+  }
+});
+
+test("runCodex reviews a detached exact PR head, rejects base-head evidence, and preserves the base checkout", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const repoDir = join(root, "repo");
+  const binDir = join(root, "bin");
+  mkdirSync(repoDir);
+  mkdirSync(binDir);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, {
+      cwd: repoDir,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  git("init");
+  git("config", "user.name", "fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  writeFileSync(join(repoDir, "version.txt"), "base");
+  git("add", ".");
+  git("commit", "-m", "base");
+  const base = git("rev-parse", "HEAD");
+  writeFileSync(join(repoDir, "version.txt"), "final");
+  git("commit", "-am", "final");
+  const head = git("rev-parse", "HEAD");
+  git("checkout", "--detach", base);
+  const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  const gitPath = join(binDir, "git");
+  writeFileSync(
+    gitPath,
+    `#!/usr/bin/env node
+const cp=require("node:child_process"),fs=require("node:fs");
+if(process.argv[2]==="status" && process.env.CODEX_FIXTURE_STATUS_HANG) {
+ const counter=process.env.CODEX_FIXTURE_STATUS_COUNTER;
+ const count=fs.existsSync(counter) ? Number(fs.readFileSync(counter,"utf8")) : 0;
+ fs.writeFileSync(counter,String(count+1));
+ if(process.env.CODEX_FIXTURE_STATUS_HANG==="before" || count>0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60_000);
+}
+if(process.env.CODEX_FIXTURE_FAIL_CLEANUP && process.argv[2]==="worktree" && process.argv[3]==="remove") process.exit(1);
+const result=cp.spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:"inherit"});
+process.exit(result.status ?? 1);
+`,
+  );
+  chmodSync(gitPath, 0o755);
+  const codexPath = join(binDir, "codex");
+  writeFileSync(
+    codexPath,
+    `#!/usr/bin/env node
+const fs=require("node:fs"), cp=require("node:child_process");
+const head=cp.execFileSync("git",["rev-parse","HEAD"],{encoding:"utf8"}).trim();
+if(head!==process.env.CODEX_FIXTURE_HEAD || fs.readFileSync("version.txt","utf8")!=="final") process.exit(5);
+const event=(command,output)=>process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command,aggregated_output:output}})+"\\n");
+event("git rev-parse HEAD",process.env.CODEX_FIXTURE_WRONG_HEAD || head);
+event("git show --format=fuller --stat "+head,"commit "+head);
+fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],process.env.CODEX_DECISION_JSON);
+`,
+  );
+  chmodSync(codexPath, 0o755);
+  const prior = {
+    GIT_BIN: process.env.GIT_BIN,
+    CODEX_FIXTURE_STATUS_HANG: process.env.CODEX_FIXTURE_STATUS_HANG,
+    CODEX_FIXTURE_STATUS_COUNTER: process.env.CODEX_FIXTURE_STATUS_COUNTER,
+    PATH: process.env.PATH,
+    CODEX_FIXTURE_FAIL_CLEANUP: process.env.CODEX_FIXTURE_FAIL_CLEANUP,
+    CODEX_FIXTURE_HEAD: process.env.CODEX_FIXTURE_HEAD,
+    CODEX_FIXTURE_WRONG_HEAD: process.env.CODEX_FIXTURE_WRONG_HEAD,
+    CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH}`;
+  process.env.CODEX_FIXTURE_HEAD = head;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(
+    closeDecision({ decision: "keep_open", closeReason: "none" }),
+  );
+  const options = {
+    item: item({ kind: "pull_request", number: 99 }),
+    context: { issue: {}, comments: [], timeline: [], pullRequest: { head: { sha: head } } },
+    git: { mainSha: base, latestRelease: null },
+    model: "gpt-test",
+    openclawDir: repoDir,
+    reasoningEffort: "medium",
+    sandboxMode: "read-only",
+    serviceTier: "",
+    timeoutMs: 10_000,
+    workDir: join(root, "work"),
+    prompt: "Review the final checkout.",
+  };
+  try {
+    process.env.CODEX_FIXTURE_WRONG_HEAD = base;
+    assert.throws(() => runCodexForTest(options), /missing successful checkout/);
+    process.env.CODEX_FIXTURE_FAIL_CLEANUP = "1";
+    assert.throws(
+      () => runCodexForTest(options),
+      (error: Error) => {
+        assert.match(error.message, /review and checkout cleanup both failed/);
+        assert.match(String(error.cause), /missing successful checkout/);
+        return true;
+      },
+    );
+    delete process.env.CODEX_FIXTURE_FAIL_CLEANUP;
+    const leaked = git("worktree", "list", "--porcelain")
+      .split("\n")
+      .filter((line) => line.startsWith("worktree "))
+      .map((line) => line.slice(9))
+      .filter((path) => path.includes("99.checkout-"));
+    for (const path of leaked) git("worktree", "remove", "--force", "--", path);
+    delete process.env.CODEX_FIXTURE_WRONG_HEAD;
+    assert.equal(runCodexForTest(options).executionEvidence.headSha, head);
+    process.env.GIT_BIN = gitPath;
+    process.env.CODEX_FIXTURE_STATUS_COUNTER = join(root, "status-counter");
+    for (const phase of ["before", "after"]) {
+      writeFileSync(process.env.CODEX_FIXTURE_STATUS_COUNTER, "0");
+      process.env.CODEX_FIXTURE_STATUS_HANG = phase;
+      const began = Date.now();
+      assert.throws(() => runCodexForTest({ ...options, timeoutMs: 4000 }), /ETIMEDOUT|timed out/);
+      assert.ok(Date.now() - began < 5500, `${phase} status exceeded the shared deadline`);
+    }
+    delete process.env.CODEX_FIXTURE_STATUS_HANG;
+    assert.equal(git("rev-parse", "HEAD"), base);
+    assert.equal(readFileSync(join(repoDir, "version.txt"), "utf8"), "base");
+    assert.equal(git("worktree", "list", "--porcelain").match(/^worktree /gm).length, 1);
+  } finally {
+    for (const [key, value] of Object.entries(prior)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
   }
 });
