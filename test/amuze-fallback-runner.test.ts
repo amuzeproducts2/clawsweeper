@@ -24,6 +24,7 @@ import {
   threadResolutionOutcome,
   statusConsumesAction,
   allRequiredSignalsGreen,
+  validationChecks,
   adjudicatedThreadsForHead,
   parseRepairEvidence,
   agentRepairReadiness,
@@ -3483,4 +3484,24 @@ test("the post-fallback fingerprint preserves the two-session budget after the a
   assert.equal(state.attemptFingerprint, afterFingerprint);
   assert.equal(state.attempts, 2);
   assert.equal(state.status, "agent_owned");
+});
+
+test("only the identified activity notification is excluded from code validation", () => {
+  const ci = { name: "CI", bucket: "pass", state: "SUCCESS" };
+  const notify = {
+    name: "notify",
+    workflow: "github activity to openclaw",
+    bucket: "fail",
+    state: "CANCELLED",
+  };
+  assert.deepEqual(validationChecks([ci, notify]), [ci]);
+  assert.equal(allRequiredSignalsGreen(validationChecks([ci, notify])), true);
+  assert.equal(allRequiredSignalsGreen(validationChecks([notify])), false);
+  for (const check of [
+    { ...notify, workflow: "CI" },
+    { ...notify, workflow: undefined },
+    { ...notify, name: "test" },
+    { name: "Macroscope correctness", state: "SKIPPED", bucket: "skipping" },
+  ])
+    assert.equal(allRequiredSignalsGreen(validationChecks([ci, check])), false);
 });

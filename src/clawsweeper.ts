@@ -1902,11 +1902,12 @@ function evidenceEntry(options: Partial<Evidence> & Pick<Evidence, "label" | "de
 function run(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number | undefined } = {},
 ): string {
   return runText(command, args, {
     cwd: options.cwd ?? ROOT,
     env: options.env,
+    timeout: options.timeoutMs,
     maxBuffer: 128 * 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
     trim: "both",
@@ -6548,9 +6549,10 @@ class CodexReviewError extends Error {
   }
 }
 
-function openclawDirtyStatus(openclawDir: string): string {
+function openclawDirtyStatus(openclawDir: string, timeoutMs?: number): string {
   return run("git", ["status", "--porcelain=v1", "--untracked-files=all"], {
     cwd: openclawDir,
+    timeoutMs,
     env: { GIT_OPTIONAL_LOCKS: "0" },
   });
 }
@@ -6696,6 +6698,16 @@ function runCodexInCheckout(options: {
   proofScratchDir?: string;
   prompt?: string;
 }): Decision {
+  const startedAt = Date.now();
+  const remainingReviewMs = () => {
+    const remaining = options.timeoutMs - (Date.now() - startedAt);
+    if (remaining <= 0)
+      throw new Error(
+        `Codex review timed out for #${options.item.number} after ${options.timeoutMs}ms.`,
+      );
+    return remaining;
+  };
+  const statusReserveMs = Math.min(10_000, Math.max(100, Math.floor(options.timeoutMs / 5)));
   ensureDir(options.workDir);
   const proofScratchDir =
     options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
@@ -6728,7 +6740,7 @@ function runCodexInCheckout(options: {
     reviewPrompt,
   ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
-  const dirtyBefore = openclawDirtyStatus(options.openclawDir);
+  const dirtyBefore = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
   if (dirtyBefore) {
     throw new Error(
       `OpenClaw checkout is dirty before reviewing #${options.item.number}:\n${dirtyBefore}`,
@@ -6764,10 +6776,9 @@ function runCodexInCheckout(options: {
     5,
     Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
   );
-  const startedAt = Date.now();
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (existsSync(outputPath)) unlinkSync(outputPath);
-    const remainingMs = options.timeoutMs - (Date.now() - startedAt);
+    const remainingMs = remainingReviewMs() - statusReserveMs;
     if (remainingMs <= 0) {
       throw new Error(
         `Codex review timed out for #${options.item.number} after ${options.timeoutMs}ms.`,
@@ -6806,12 +6817,13 @@ function runCodexInCheckout(options: {
         timeout: remainingMs,
       },
     );
-    const dirtyAfter = openclawDirtyStatus(options.openclawDir);
+    const dirtyAfter = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
     if (dirtyAfter) {
       throw new Error(
         `Codex dirtied the OpenClaw checkout while reviewing #${options.item.number}:\n${dirtyAfter}`,
       );
     }
+    remainingReviewMs();
     const stderr = redactedOutputTail(result.stderr);
     const stdout = redactedOutputTail(result.stdout);
     let failureDetail = "";

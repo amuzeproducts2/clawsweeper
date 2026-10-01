@@ -1707,11 +1707,12 @@ function inspectPr(repo, number) {
     "--json",
     "title,url,state,closed,mergedAt,author,headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isCrossRepository,maintainerCanModify,files,commits,labels,isDraft,mergeable,reviewDecision,latestReviews",
   ]);
-  const checks = runJsonBestEffort(
+  const observedChecks = runJsonBestEffort(
     "gh",
     ["pr", "checks", String(number), "--repo", repo, "--json", "name,state,bucket,link,workflow"],
     [],
   );
+  const checks = validationChecks(observedChecks);
   const reviewComments = paginatedRestItems(
     runJson("gh", [
       "api",
@@ -1735,6 +1736,7 @@ function inspectPr(repo, number) {
   return {
     pr,
     checks,
+    notificationChecks: observedChecks.filter((check) => !checks.includes(check)),
     reviewComments,
     reviews,
     conversationComments,
@@ -1779,6 +1781,14 @@ function dependabotOnlyCommitHistory(commits = []) {
         authors.every((author) => String(author?.login ?? "").toLowerCase() === "dependabot[bot]")
       );
     })
+  );
+}
+
+function validationChecks(checks) {
+  // This exact workflow relays activity; it never validates the PR's code.
+  // GitHub still enforces required checks at ordinary (non-admin) merge time.
+  return checks.filter(
+    (check) => !(check.name === "notify" && check.workflow === "github activity to openclaw"),
   );
 }
 
@@ -4566,6 +4576,7 @@ export {
   verifyCommittedRepair,
   finalRegressionSandboxArgs,
   allRequiredSignalsGreen,
+  validationChecks,
   reviewWasSuperseded,
   reviewStateIsCurrent,
   reviewThreadsFromGraphql,

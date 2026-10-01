@@ -18616,7 +18616,13 @@ test("runCodex reviews a detached exact PR head, rejects base-head evidence, and
   writeFileSync(
     gitPath,
     `#!/usr/bin/env node
-const cp=require("node:child_process");
+const cp=require("node:child_process"),fs=require("node:fs");
+if(process.argv[2]==="status" && process.env.CODEX_FIXTURE_STATUS_HANG) {
+ const counter=process.env.CODEX_FIXTURE_STATUS_COUNTER;
+ const count=fs.existsSync(counter) ? Number(fs.readFileSync(counter,"utf8")) : 0;
+ fs.writeFileSync(counter,String(count+1));
+ if(process.env.CODEX_FIXTURE_STATUS_HANG==="before" || count>0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60_000);
+}
 if(process.env.CODEX_FIXTURE_FAIL_CLEANUP && process.argv[2]==="worktree" && process.argv[3]==="remove") process.exit(1);
 const result=cp.spawnSync(${JSON.stringify(realGit)},process.argv.slice(2),{stdio:"inherit"});
 process.exit(result.status ?? 1);
@@ -18638,6 +18644,9 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
   );
   chmodSync(codexPath, 0o755);
   const prior = {
+    GIT_BIN: process.env.GIT_BIN,
+    CODEX_FIXTURE_STATUS_HANG: process.env.CODEX_FIXTURE_STATUS_HANG,
+    CODEX_FIXTURE_STATUS_COUNTER: process.env.CODEX_FIXTURE_STATUS_COUNTER,
     PATH: process.env.PATH,
     CODEX_FIXTURE_FAIL_CLEANUP: process.env.CODEX_FIXTURE_FAIL_CLEANUP,
     CODEX_FIXTURE_HEAD: process.env.CODEX_FIXTURE_HEAD,
@@ -18683,6 +18692,16 @@ fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],p
     for (const path of leaked) git("worktree", "remove", "--force", "--", path);
     delete process.env.CODEX_FIXTURE_WRONG_HEAD;
     assert.equal(runCodexForTest(options).executionEvidence.headSha, head);
+    process.env.GIT_BIN = gitPath;
+    process.env.CODEX_FIXTURE_STATUS_COUNTER = join(root, "status-counter");
+    for (const phase of ["before", "after"]) {
+      writeFileSync(process.env.CODEX_FIXTURE_STATUS_COUNTER, "0");
+      process.env.CODEX_FIXTURE_STATUS_HANG = phase;
+      const began = Date.now();
+      assert.throws(() => runCodexForTest({ ...options, timeoutMs: 4000 }), /ETIMEDOUT|timed out/);
+      assert.ok(Date.now() - began < 5500, `${phase} status exceeded the shared deadline`);
+    }
+    delete process.env.CODEX_FIXTURE_STATUS_HANG;
     assert.equal(git("rev-parse", "HEAD"), base);
     assert.equal(readFileSync(join(repoDir, "version.txt"), "utf8"), "base");
     assert.equal(git("worktree", "list", "--porcelain").match(/^worktree /gm).length, 1);
