@@ -149,3 +149,25 @@ promtool check metrics < /var/lib/node_exporter/textfile_collector/clawsweeper_o
 ```
 
 Runtime state is never stored inside an immutable release checkout.
+
+
+### Technical review recovery
+
+A failed reviewer login, transport, or execution is not a completed review. The
+first two attempts retain the existing immediate budget; further attempts on the
+same head and evidence are deferred for 1, 2, 4, 8, 16, then at most 24 hours.
+The scheduler revisits eligible items normally, so these are minimum intervals,
+not an execution-time SLA. New head/evidence starts a fresh budget. Existing
+`agent_owned` records recover without deleting state; invalid legacy timestamps
+allow one retry, which writes a fresh timestamp. Completed exact-evidence verdicts
+remain quiescent and all merge, security, compatibility, and pause gates remain.
+
+Deferred failures expose `nextRetryAt`, persist `reviewRecoveryPending` in the
+run history and scheduler, and export
+`clawsweeper_orchestrator_review_recovery_pending`. A run with pending technical
+recovery is unhealthy even if it performs no model actions. Authentication errors
+are diagnosed from the review artifact without copying token material into the
+reason. Other long subprocess failures retain their error tail, not only the
+command prefix. Restore the existing reviewer login through the authorized
+credential procedure for a 401/refresh failure; do not rotate credentials or
+remove review gates as an automated workaround.

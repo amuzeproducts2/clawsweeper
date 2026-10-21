@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  utimesSync,
   chmodSync,
   cpSync,
   existsSync,
@@ -17,6 +18,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  freshReviewFailureReport,
+  reviewRetryDecision,
+  reviewFailureReason,
   actionableReviewThreads,
   verifyCommittedRepair,
   finalRegressionSandboxArgs,
@@ -3519,4 +3523,172 @@ test("only the identified activity notification is excluded from code validation
     { name: "Macroscope correctness", state: "SKIPPED", bucket: "skipping" },
   ])
     assert.equal(allRequiredSignalsGreen(validationChecks([ci, check])), false);
+});
+
+test("technical review failures recover unchanged heads with bounded exponential backoff", () => {
+  const now = Date.parse("2026-10-21T05:00:00Z");
+  const inspection = { pr: { headRefOid: headSha }, checks: [] };
+  const state = {
+    status: "agent_owned",
+    verdict: "needs-repair",
+    headSha,
+    attemptFingerprint: mergeSignalFingerprint(inspection),
+    attempts: 2,
+    reviewedAt: "2026-10-21T04:30:00Z",
+  };
+  assert.equal(reviewRetryDecision(state, inspection, now).retry, false);
+  assert.equal(reviewRetryDecision(state, inspection, now).nextRetryAt, "2026-10-21T05:30:00.000Z");
+  assert.equal(reviewRetryDecision(state, inspection, now + 30 * 60_000).retry, true);
+  assert.equal(
+    reviewRetryDecision({ ...state, attempts: 3 }, inspection, now).nextRetryAt,
+    "2026-10-21T06:30:00.000Z",
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, attempts: 200 }, inspection, now).nextRetryAt,
+    "2026-10-22T04:30:00.000Z",
+  );
+  assert.equal(reviewRetryDecision({ ...state, headSha: "old" }, inspection, now).attempts, 0);
+  assert.equal(
+    reviewRetryDecision({ ...state, attemptFingerprint: "old" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, reviewedAt: "invalid" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, reviewedAt: "2099-01-01" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(reviewStateIsCurrent(state, inspection), false);
+  for (const verdict of ["needs-human", "pass", "needs-repair"]) {
+    assert.equal(
+      reviewStateIsCurrent(
+        {
+          ...state,
+          status: "complete",
+          verdict,
+          evidenceFingerprint: mergeSignalFingerprint(inspection),
+        },
+        inspection,
+      ),
+      true,
+    );
+  }
+});
+
+test("deferred technical review failures cannot report a healthy run or consume model actions", () => {
+  assert.equal(statusConsumesAction("agent_review_retry_exhausted"), false);
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 0,
+      reviewFailures: 0,
+      reviewRecoveryPending: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 1,
+      reviewFailures: 0,
+      reviewRecoveryPending: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 0,
+      reviewFailures: 0,
+      reviewRecoveryPending: 0,
+    }),
+    true,
+  );
+  assert.match(
+    renderRunMetrics({ reviewRecoveryPending: 2 }),
+    /clawsweeper_orchestrator_review_recovery_pending 2/,
+  );
+});
+
+test("review diagnostics retain the cause instead of truncating to a long command", () => {
+  assert.match(
+    reviewFailureReason(new Error("node " + "x".repeat(2000) + "\nactual failure")),
+    /actual failure$/,
+  );
+  assert.match(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "workspace routing discovery unauthorized (401)",
+    ),
+    /Codex authentication failed/,
+  );
+  assert.match(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "Failed to refresh token: private material",
+    ),
+    /token refresh/,
+  );
+  assert.doesNotMatch(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "Failed to refresh token: private material",
+    ),
+    /private material/,
+  );
+});
+
+test("only newly written diagnostic fields can diagnose the current failed attempt", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-fresh-diagnostics-"));
+  const path = join(root, "93.md");
+  const now = Date.now();
+  const header = "---\nreview_status: failed\n---\n";
+  writeFileSync(path, header + "- **codex stderr:** Failed to refresh token: private material");
+  utimesSync(path, new Date(now - 2000), new Date(now - 2000));
+  const previous = statSync(path).mtimeMs;
+  assert.equal(freshReviewFailureReport(path, now, previous), "");
+  assert.equal(freshReviewFailureReport(path, now - 3000, previous), "");
+  writeFileSync(
+    path,
+    header +
+      "# PR description\nFailed to refresh token: quoted prose\n- **codex stderr:** process timed out",
+  );
+  utimesSync(path, new Date(now + 1000), new Date(now + 1000));
+  const diagnostic = freshReviewFailureReport(path, now, previous);
+  assert.equal(diagnostic, "process timed out");
+  assert.equal(reviewFailureReason(new Error("current timeout"), diagnostic), "current timeout");
+  assert.equal(freshReviewFailureReport(join(root, "missing.md"), now, null), "");
+  writeFileSync(path, header + "- **codex stderr:** Failed to refresh token: private material");
+  utimesSync(path, new Date(now + 2000), new Date(now + 2000));
+  assert.match(
+    reviewFailureReason(
+      new Error("generic failure"),
+      freshReviewFailureReport(path, now, previous),
+    ),
+    /authentication failed/,
+  );
+});
+
+test("message-only authentication failures are redacted even without a fresh report", () => {
+  const reason = reviewFailureReason(new Error("Failed to refresh token: private material"));
+  assert.match(reason, /authentication failed/);
+  assert.doesNotMatch(reason, /private material/);
+});
+
+test("fresh failure diagnostics retain continuation lines and stop at the next field", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-multiline-diagnostics-"));
+  const path = join(root, "93.md");
+  const now = Date.now();
+  writeFileSync(
+    path,
+    "---\nreview_status: failed\n---\n## Evidence\n- **codex stderr:** startup warning\nFailed to refresh token: private material\n- **codex stdout:** quoted PR content\n## Next section\nmore PR text",
+  );
+  const diagnostic = freshReviewFailureReport(path, now - 1000, null);
+  assert.match(diagnostic, /startup warning\nFailed to refresh token/);
+  assert.doesNotMatch(diagnostic, /quoted PR content|more PR text/);
+  const reason = reviewFailureReason(new Error("generic subprocess failure"), diagnostic);
+  assert.match(reason, /authentication failed/);
+  assert.doesNotMatch(reason, /private material/);
 });
