@@ -1503,8 +1503,12 @@ function freshReviewFailureReport(path, startedAt, previousMtime) {
     const frontmatter = report.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? "";
     if (!/^review_status: failed$/m.test(frontmatter)) return "";
     // Only the failure writer's diagnostic fields are evidence, not PR prose.
-    return [...report.matchAll(/^- \*\*codex (?:stderr|failure detail):\*\* (.*)$/gm)]
-      .map((match) => match[1])
+    return [
+      ...report.matchAll(
+        /(?:^|\n)- \*\*codex (?:stderr|failure detail):\*\* ([\s\S]*?)(?=\n- \*\*|\n## |$)/g,
+      ),
+    ]
+      .map((match) => match[1].trimEnd())
       .join("\n");
   } catch {
     // Missing/unreadable diagnostics must not mask the primary exception.

@@ -3676,3 +3676,19 @@ test("message-only authentication failures are redacted even without a fresh rep
   assert.match(reason, /authentication failed/);
   assert.doesNotMatch(reason, /private material/);
 });
+
+test("fresh failure diagnostics retain continuation lines and stop at the next field", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-multiline-diagnostics-"));
+  const path = join(root, "93.md");
+  const now = Date.now();
+  writeFileSync(
+    path,
+    "---\nreview_status: failed\n---\n## Evidence\n- **codex stderr:** startup warning\nFailed to refresh token: private material\n- **codex stdout:** quoted PR content\n## Next section\nmore PR text",
+  );
+  const diagnostic = freshReviewFailureReport(path, now - 1000, null);
+  assert.match(diagnostic, /startup warning\nFailed to refresh token/);
+  assert.doesNotMatch(diagnostic, /quoted PR content|more PR text/);
+  const reason = reviewFailureReason(new Error("generic subprocess failure"), diagnostic);
+  assert.match(reason, /authentication failed/);
+  assert.doesNotMatch(reason, /private material/);
+});
