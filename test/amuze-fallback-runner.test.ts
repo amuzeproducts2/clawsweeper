@@ -2094,7 +2094,7 @@ test("repaired heads wait for checks, then require exact-head review, then becom
       },
       repairState,
     ).status,
-    "waiting",
+    "review",
   );
   assert.equal(
     agentRepairReadiness(
@@ -3278,7 +3278,7 @@ test("clean routine reviews have an explicit lane and cannot fabricate a pushed 
       state,
       "routine",
     ).status,
-    "human",
+    "review",
   );
   assert.equal(
     agentRepairReadiness(
@@ -3691,4 +3691,122 @@ test("fresh failure diagnostics retain continuation lines and stop at the next f
   const reason = reviewFailureReason(new Error("generic subprocess failure"), diagnostic);
   assert.match(reason, /authentication failed/);
   assert.doesNotMatch(reason, /private material/);
+});
+
+test("large reviewed PRs do not inherit repair worker limits, but retain merge gates", () => {
+  const inspection = {
+    pr: pullRequest({ reviewDecision: "APPROVED", files: [{ path: "src/worker.ts" }] }),
+    stats: { files: 80, additions: 9000, deletions: 2000 },
+    checks: passingChecks(),
+    reviewThreads: [],
+    conversationComments: [
+      {
+        ...agentPass(),
+        body: agentPass().body.replace(
+          "evidence=verified-v4",
+          "evidence=verified-v4 patch=complete-v1",
+        ),
+      },
+    ],
+    reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+  };
+  const state = { status: "reviewed", reviewedSha: headSha };
+  const ready = (changes = {}) =>
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, ...changes },
+      state,
+      "routine",
+    ).status;
+  assert.equal(ready(), "ready");
+  assert.equal(ready({ conversationComments: [agentPass()] }), "review");
+  for (const name of [
+    "merge-risk: 🚨 compatibility",
+    "merge-risk: 🚨 availability",
+    "merge-risk: 🚨 automation",
+  ]) {
+    assert.equal(ready({ pr: { ...inspection.pr, labels: [{ name }] } }), "human");
+  }
+  assert.equal(ready({ checks: [] }), "waiting");
+  assert.equal(ready({ conversationComments: [] }), "review");
+  assert.equal(ready({ conversationComments: [agentPass("oldhead")] }), "review");
+  assert.equal(ready({ reviews: [] }), "waiting");
+  assert.equal(ready({ pr: { ...inspection.pr, labels: [{ name: "human-review" }] } }), "human");
+});
+
+test("workflow merge requires explicit verified exact-head security clearance", () => {
+  const cleared = {
+    ...agentPass(),
+    body: agentPass().body.replace(
+      "evidence=verified-v4",
+      "evidence=verified-v4 security=cleared patch=complete-v1",
+    ),
+  };
+  const inspection = {
+    pr: pullRequest({ reviewDecision: "APPROVED", files: [{ path: ".github/workflows/ci.yml" }] }),
+    stats: { files: 1, additions: 4, deletions: 2 },
+    checks: passingChecks(),
+    reviewThreads: [],
+    conversationComments: [cleared],
+    reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
+  };
+  const state = { status: "reviewed", reviewedSha: headSha };
+  const ready = (changes = {}) =>
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      { ...inspection, ...changes },
+      state,
+      "routine",
+    ).status;
+  assert.equal(ready(), "ready");
+  assert.equal(ready({ conversationComments: [agentPass()] }), "review");
+  assert.equal(
+    ready({
+      conversationComments: [{ ...cleared, body: cleared.body.replace(headSha, "oldhead") }],
+    }),
+    "review",
+  );
+  assert.equal(
+    ready({
+      conversationComments: [
+        { ...cleared, body: cleared.body.replace("verified-v4", "verified-v3") },
+      ],
+    }),
+    "review",
+  );
+  assert.equal(ready({ checks: [] }), "waiting");
+  assert.equal(
+    ready({
+      conversationComments: [
+        {
+          ...cleared,
+          body:
+            cleared.body +
+            `\n<!-- clawsweeper-security:security-sensitive item=7 sha=${headSha} -->`,
+        },
+      ],
+    }),
+    "human",
+  );
+  assert.equal(
+    ready({ pr: { ...inspection.pr, files: [{ path: "credentials/key.json" }] } }),
+    "human",
+  );
+  const cached = {
+    status: "complete",
+    verdict: "pass",
+    headSha,
+    evidenceFingerprint: mergeSignalFingerprint(inspection),
+  };
+  assert.equal(reviewStateIsCurrent(cached, inspection), true);
+  const legacy = { ...inspection, conversationComments: [agentPass()] };
+  assert.equal(
+    reviewStateIsCurrent(
+      { ...cached, evidenceFingerprint: mergeSignalFingerprint(legacy) },
+      legacy,
+    ),
+    false,
+  );
 });

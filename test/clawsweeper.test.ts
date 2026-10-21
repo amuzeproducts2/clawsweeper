@@ -18653,7 +18653,7 @@ if(head!==process.env.CODEX_FIXTURE_HEAD || fs.readFileSync("version.txt","utf8"
 const event=(command,output)=>process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command,aggregated_output:output}})+"\\n");
 event("git rev-parse HEAD",process.env.CODEX_FIXTURE_WRONG_HEAD || head);
 event("git show --format=fuller --stat "+head,"commit "+head);
-if (!process.env.CODEX_FIXTURE_SKIP_PATCH) event("git diff --no-ext-diff --no-textconv --unified=3 "+process.env.CODEX_FIXTURE_BASE+" "+head+" --","diff --git a/version.txt b/version.txt\\n-base\\n+final");
+if (!process.env.CODEX_FIXTURE_SKIP_PATCH) event("git diff --no-ext-diff --no-textconv --unified=3 "+process.env.CODEX_FIXTURE_BASE+" "+head+" --",cp.execFileSync("git",["diff","--no-ext-diff","--no-textconv","--unified=3",process.env.CODEX_FIXTURE_BASE,head,"--"],{encoding:"utf8"}));
 fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],process.env.CODEX_DECISION_JSON);
 `,
   );
@@ -18771,5 +18771,27 @@ test("fresh source-inspection markers reject metadata-only version 3 evidence", 
       report.replace(`local_review_head_sha: ${sha}`, `local_review_head_sha: ${"b".repeat(40)}`),
     ),
     /evidence=verified/,
+  );
+});
+
+test("security clearance markers require verified checkout and a clean security assessment", () => {
+  const sha = "a".repeat(40);
+  const report = `---\nnumber: 7\ntype: pull_request\npull_head_sha: ${sha}\nlocal_review_head_sha: ${sha}\nlocal_checkout_access: verified\nreview_execution_version: 4\ndecision: keep_open\n---\n\n## Security Review\n\nStatus: cleared\n\nSummary: Inspected the complete workflow patch and found no privilege expansion.\n\nConcerns:\n\n- none\n`;
+  assert.match(reviewAutomationMarkersFromReport(report), /security=cleared/);
+  assert.doesNotMatch(
+    reviewAutomationMarkersFromReport(report.replace("Status: cleared", "Status: needs_attention")),
+    /security=cleared/,
+  );
+  assert.doesNotMatch(
+    reviewAutomationMarkersFromReport(
+      report.replace("review_execution_version: 4", "review_execution_version: 3"),
+    ),
+    /security=cleared/,
+  );
+  assert.doesNotMatch(
+    reviewAutomationMarkersFromReport(
+      report.replace(`local_review_head_sha: ${sha}`, "local_review_head_sha: stale"),
+    ),
+    /security=cleared/,
   );
 });

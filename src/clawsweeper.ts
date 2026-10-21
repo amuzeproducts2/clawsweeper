@@ -47,6 +47,8 @@ import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
 import {
   checkoutExecutionDiagnostics,
+  patchInspectionPages,
+  completePatchEvidence,
   checkoutInspectionContract,
   verifiedCheckoutEvidence,
 } from "./codex-command-evidence.js";
@@ -418,6 +420,7 @@ interface ReviewCommentRenderOptions {
 interface Decision {
   executionEvidence?: {
     version: 4;
+    patchComplete?: boolean;
     baseSha: string;
     headSha: string | null;
     transcriptHash: string;
@@ -6732,16 +6735,32 @@ function runCodexInCheckout(options: {
       mediaProofRuntimeHints(proofScratchDir, preparedMediaProof),
     ).text;
   const headSha = pullHeadShaFromContext(options.context);
+  let patchPages: ReturnType<typeof patchInspectionPages> = [];
+  if (headSha) {
+    const patch = spawnSync(
+      "git",
+      ["diff", "--no-ext-diff", "--no-textconv", "--unified=3", options.git.mainSha, headSha, "--"],
+      {
+        cwd: options.openclawDir,
+        encoding: "utf8",
+        timeout: remainingReviewMs(),
+        maxBuffer: 128 * 1024 * 1024,
+      },
+    );
+    if (patch.error || patch.status !== 0)
+      throw new Error("Could not capture complete exact-head patch for review");
+    patchPages = patchInspectionPages(options.git.mainSha, headSha, patch.stdout);
+  }
   const prompt = [
     ...(headSha
       ? [
           `This checkout is the detached PR head ${headSha}. The base/main commit is ${options.git.mainSha}; use git show at that base SHA for comparisons rather than treating this checkout as main.`,
         ]
       : []),
-    checkoutInspectionContract(options.git.mainSha, headSha),
+    checkoutInspectionContract(options.git.mainSha, headSha, patchPages),
     reviewPrompt,
     // Keep the executable requirement after the large context as well as before it.
-    checkoutInspectionContract(options.git.mainSha, headSha),
+    checkoutInspectionContract(options.git.mainSha, headSha, patchPages),
   ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
   const dirtyBefore = openclawDirtyStatus(options.openclawDir, remainingReviewMs());
@@ -6855,11 +6874,15 @@ function runCodexInCheckout(options: {
           JSON.parse(readFileSync(outputPath, "utf8").trim()),
           options.item,
         );
-        if (!verifiedCheckoutEvidence(result.stdout ?? "", options.git.mainSha, headSha)) {
+        if (
+          !verifiedCheckoutEvidence(result.stdout ?? "", options.git.mainSha, headSha) ||
+          (headSha && !completePatchEvidence(result.stdout ?? "", patchPages))
+        ) {
           throw new Error("missing successful checkout/PR-head shell evidence");
         }
         decision.executionEvidence = {
           version: 4,
+          patchComplete: Boolean(headSha),
           baseSha: options.git.mainSha,
           headSha,
           transcriptHash: sha256(result.stdout ?? ""),
@@ -14000,7 +14023,20 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   const decision = frontMatterValue(markdown, "decision");
   const confidence = frontMatterValue(markdown, "confidence") ?? "unknown";
   const headSha = pullHeadShaFromReport(markdown) ?? "unknown";
+  const verifiedSecurityClearance =
+    frontMatterValue(markdown, "review_execution_version") === "4" &&
+    frontMatterValue(markdown, "local_review_head_sha") === headSha &&
+    hasVerifiedLocalCheckoutAccess(markdown) &&
+    reportSecurityReview(markdown).status === "cleared" &&
+    reportSecurityReview(markdown).concerns.length === 0;
   const baseAttrs = [
+    ...(verifiedSecurityClearance ? ["security=cleared"] : []),
+    ...(frontMatterValue(markdown, "local_review_patch_complete") === "true" &&
+    frontMatterValue(markdown, "review_execution_version") === "4" &&
+    frontMatterValue(markdown, "local_review_head_sha") === headSha &&
+    hasVerifiedLocalCheckoutAccess(markdown)
+      ? ["patch=complete-v1"]
+      : []),
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
@@ -14804,6 +14840,7 @@ review_status: ${options.decision.summary.startsWith("Codex review failed") ? "f
 autonomous_pr_review: ${process.env.CLAWSWEEPER_AMUZE_AUTONOMOUS_REVIEW === "1"}
 local_checkout_access: ${options.decision.executionEvidence ? "verified" : "unverified"}
 review_execution_version: ${options.decision.executionEvidence?.version ?? "unknown"}
+local_review_patch_complete: ${options.decision.executionEvidence?.patchComplete === true}
 local_review_head_sha: ${options.decision.executionEvidence?.headSha ?? "unknown"}
 review_transcript_sha256: ${options.decision.executionEvidence?.transcriptHash ?? "unknown"}
 item_snapshot_hash: ${options.snapshotHash}

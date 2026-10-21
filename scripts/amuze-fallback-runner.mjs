@@ -1531,6 +1531,15 @@ function reviewFailureReason(error, report = "") {
 }
 
 function reviewStateIsCurrent(state, inspection) {
+  const verdict = latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments);
+  if (
+    verdict?.verdict === "pass" &&
+    !verdict.escalation &&
+    ((requiresCompletePatch(inspection) && !verdict.patchComplete) ||
+      ((inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path)) &&
+        !verdict.securityCleared))
+  )
+    return false;
   return Boolean(
     state?.status === "complete" &&
     state?.verdict &&
@@ -1609,6 +1618,10 @@ function isCodePath(path) {
   return /\.(js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|php|cs|swift|sql|sh|yml|yaml|json)$/i.test(
     path,
   );
+}
+
+function isWorkflowPath(path) {
+  return /^\.github\/workflows\//i.test(path);
 }
 
 function sensitivePathReason(path) {
@@ -1754,7 +1767,7 @@ function deterministicFindings(pr, checks, reviewThreads = []) {
       finding(
         "medium",
         "Large review surface",
-        `This PR changes ${stats.files} files with +${stats.additions}/-${stats.deletions}. Split or assign a focused human reviewer if this is not mechanical.`,
+        `This PR changes ${stats.files} files with +${stats.additions}/-${stats.deletions}. Inspect the complete patch in the local checkout; use focused review passes for non-mechanical changes. Size alone is not a human escalation.`,
       ),
     );
   }
@@ -1923,6 +1936,12 @@ function latestExactHeadAgentVerdict(pr, comments = []) {
       ) {
         verdict = {
           verdict: marker[1].toLowerCase(),
+          ...(/\bsecurity=cleared\b/.test(marker[0]) && /\bevidence=verified-v4\b/.test(marker[0])
+            ? { securityCleared: true }
+            : {}),
+          ...(/\bpatch=complete-v1\b/.test(marker[0]) && /\bevidence=verified-v4\b/.test(marker[0])
+            ? { patchComplete: true }
+            : {}),
           escalation:
             /\bescalation=(business|permission)\b/.exec(marker[0])?.[1] ??
             ([
@@ -2180,7 +2199,7 @@ function autoMergeDependabotBlocker(
   if (pr.reviewDecision === "CHANGES_REQUESTED") return "requested changes are open";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
@@ -2244,7 +2263,7 @@ function autoMergeMacroscopeLowRiskBlocker(
   if (pr.isCrossRepository) return "cross-repository PR";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
@@ -2707,6 +2726,15 @@ function currentRepairForHead(repo, number, headSha) {
   return repairStateTracksHead(state, headSha) ? state : null;
 }
 
+function requiresCompletePatch(inspection) {
+  const stats = inspection.stats ?? prChangeStats(inspection.pr.files ?? []);
+  return (
+    (inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path)) ||
+    stats.files > 20 ||
+    (stats.additions ?? 0) + (stats.deletions ?? 0) > 800
+  );
+}
+
 function agentRepairReadiness(
   repo,
   number,
@@ -2714,7 +2742,7 @@ function agentRepairReadiness(
   repairState = readRepairState(repo, number),
   lane = "repair",
 ) {
-  const { pr, checks, stats, conversationComments, reviewThreads, reviews } = inspection;
+  const { pr, checks, conversationComments, reviewThreads, reviews } = inspection;
   if (
     !(lane === "routine"
       ? reviewedStateTracksHead(repairState, pr.headRefOid)
@@ -2736,21 +2764,28 @@ function agentRepairReadiness(
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
   ) {
     return { status: "human", reason: "risk/pause label present" };
   }
-  const sensitive = (pr.files ?? []).find((file) => sensitivePathReason(file.path));
-  if (sensitive) return { status: "human", reason: `sensitive path changed: ${sensitive.path}` };
-  if (stats.files > Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_FILES ?? 20)) {
-    return { status: "waiting", reason: `bounded worker file limit (${stats.files})` };
+  // Repair worker bounds are not merge bounds: this lane requires an independent
+  // full-patch exact-head review and green checks, even for large PRs.
+  const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
+  if (verdict?.escalation) {
+    return { status: "human", reason: `agent review requires ${verdict.escalation}` };
   }
-  const changedLines = (stats.additions ?? 0) + (stats.deletions ?? 0);
-  if (changedLines > Number(process.env.CLAWSWEEPER_AUTOREPAIR_MAX_LINES ?? 800)) {
-    return { status: "waiting", reason: `bounded worker line limit (${changedLines})` };
+  const sensitive = (pr.files ?? []).find(
+    (file) => sensitivePathReason(file.path) && !isWorkflowPath(file.path),
+  );
+  if (sensitive) return { status: "human", reason: `sensitive path changed: ${sensitive.path}` };
+  if ((pr.files ?? []).some((file) => isWorkflowPath(file.path)) && !verdict?.securityCleared) {
+    return { status: "review", reason: "workflow changes require exact-head security clearance" };
+  }
+  if (requiresCompletePatch(inspection) && !verdict?.patchComplete) {
+    return { status: "review", reason: "complete exact-head patch coverage required" };
   }
   const activeThreads = actionableReviewThreads(reviewThreads);
   const coveredThreads = adjudicatedThreadsForHead(repairState, pr.headRefOid, activeThreads);
@@ -2772,7 +2807,6 @@ function agentRepairReadiness(
   if (!allRequiredSignalsGreen(resolutionChecks)) {
     return { status: "waiting", reason: "waiting for exact-head checks" };
   }
-  const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
   if (
     pr.reviewDecision === "CHANGES_REQUESTED" &&
     !coveredThreads.length &&
@@ -3209,7 +3243,7 @@ function autoRepairBlocker(repo, pr, checks, findings, stats, reviewThreads = []
   if (pr.isCrossRepository) return "cross-repository PR";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
