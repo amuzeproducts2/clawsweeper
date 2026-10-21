@@ -1534,9 +1534,10 @@ function reviewStateIsCurrent(state, inspection) {
   const verdict = latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments);
   if (
     verdict?.verdict === "pass" &&
-    !verdict.securityCleared &&
     !verdict.escalation &&
-    (inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path))
+    ((requiresCompletePatch(inspection) && !verdict.patchComplete) ||
+      ((inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path)) &&
+        !verdict.securityCleared))
   )
     return false;
   return Boolean(
@@ -1938,6 +1939,9 @@ function latestExactHeadAgentVerdict(pr, comments = []) {
           ...(/\bsecurity=cleared\b/.test(marker[0]) && /\bevidence=verified-v4\b/.test(marker[0])
             ? { securityCleared: true }
             : {}),
+          ...(/\bpatch=complete-v1\b/.test(marker[0]) && /\bevidence=verified-v4\b/.test(marker[0])
+            ? { patchComplete: true }
+            : {}),
           escalation:
             /\bescalation=(business|permission)\b/.exec(marker[0])?.[1] ??
             ([
@@ -2195,7 +2199,7 @@ function autoMergeDependabotBlocker(
   if (pr.reviewDecision === "CHANGES_REQUESTED") return "requested changes are open";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
@@ -2259,7 +2263,7 @@ function autoMergeMacroscopeLowRiskBlocker(
   if (pr.isCrossRepository) return "cross-repository PR";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
@@ -2722,6 +2726,15 @@ function currentRepairForHead(repo, number, headSha) {
   return repairStateTracksHead(state, headSha) ? state : null;
 }
 
+function requiresCompletePatch(inspection) {
+  const stats = inspection.stats ?? prChangeStats(inspection.pr.files ?? []);
+  return (
+    (inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path)) ||
+    stats.files > 20 ||
+    (stats.additions ?? 0) + (stats.deletions ?? 0) > 800
+  );
+}
+
 function agentRepairReadiness(
   repo,
   number,
@@ -2751,7 +2764,7 @@ function agentRepairReadiness(
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )
@@ -2770,6 +2783,9 @@ function agentRepairReadiness(
   if (sensitive) return { status: "human", reason: `sensitive path changed: ${sensitive.path}` };
   if ((pr.files ?? []).some((file) => isWorkflowPath(file.path)) && !verdict?.securityCleared) {
     return { status: "review", reason: "workflow changes require exact-head security clearance" };
+  }
+  if (requiresCompletePatch(inspection) && !verdict?.patchComplete) {
+    return { status: "review", reason: "complete exact-head patch coverage required" };
   }
   const activeThreads = actionableReviewThreads(reviewThreads);
   const coveredThreads = adjudicatedThreadsForHead(repairState, pr.headRefOid, activeThreads);
@@ -3227,7 +3243,7 @@ function autoRepairBlocker(repo, pr, checks, findings, stats, reviewThreads = []
   if (pr.isCrossRepository) return "cross-repository PR";
   if (
     labels.some((label) =>
-      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked/i.test(
+      /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i.test(
         label,
       ),
     )

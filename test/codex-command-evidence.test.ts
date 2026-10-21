@@ -142,3 +142,54 @@ test("PR inspection requires the successful final patch read, not only metadata 
   assert.match(contract, /Attempt the required calls/);
   assert.ok(contract.includes(command));
 });
+
+test("complete patch coverage requires every bounded chunk, without omissions or truncation", async () => {
+  const { patchInspectionPages, completePatchEvidence } =
+    await import("../dist/codex-command-evidence.js");
+  const patch = "diff --git a/large.txt b/large.txt\n" + "+line 🦀\n".repeat(1500);
+  const pages = patchInspectionPages("base", "final", patch);
+  assert.ok(pages.length > 3);
+  const transcript = pages.map((page) => event(page.command, page.output)).join("\n");
+  assert.equal(completePatchEvidence(transcript, pages), true);
+  for (const missing of [0, Math.floor(pages.length / 2), pages.length - 1]) {
+    assert.equal(
+      completePatchEvidence(
+        pages
+          .filter((_, index) => index !== missing)
+          .map((page) => event(page.command, page.output))
+          .join("\n"),
+        pages,
+      ),
+      false,
+    );
+  }
+  assert.equal(completePatchEvidence(transcript.replace("+line", "-line"), pages), false);
+  assert.equal(
+    completePatchEvidence(
+      pages.map((page) => event(page.command, page.output.slice(0, 100))).join("\n"),
+      pages,
+    ),
+    false,
+  );
+  assert.equal(
+    completePatchEvidence(
+      pages.map((page) => event(page.command, page.output, { exit_code: 1 })).join("\n"),
+      pages,
+    ),
+    false,
+  );
+  assert.equal(
+    completePatchEvidence(event(checkoutDiffCommand("base", "final"), patch), pages),
+    false,
+  );
+  assert.equal(
+    completePatchEvidence(transcript, patchInspectionPages("base", "stale", patch)),
+    false,
+  );
+  assert.equal(completePatchEvidence(transcript, []), false);
+  const contract = checkoutInspectionContract("base", "final", pages);
+  for (const page of pages) assert.ok(contract.includes(page.command));
+  const small = patchInspectionPages("base", "final", "+fix\n");
+  assert.equal(completePatchEvidence(event(small[0].command, "+fix\n"), small), true);
+  assert.equal(completePatchEvidence(event(small[0].command, "+fi"), small), false);
+});

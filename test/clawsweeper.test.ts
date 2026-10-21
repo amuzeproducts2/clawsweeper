@@ -18653,7 +18653,7 @@ if(head!==process.env.CODEX_FIXTURE_HEAD || fs.readFileSync("version.txt","utf8"
 const event=(command,output)=>process.stdout.write(JSON.stringify({type:"item.completed",item:{type:"command_execution",status:"completed",exit_code:0,command,aggregated_output:output}})+"\\n");
 event("git rev-parse HEAD",process.env.CODEX_FIXTURE_WRONG_HEAD || head);
 event("git show --format=fuller --stat "+head,"commit "+head);
-if (!process.env.CODEX_FIXTURE_SKIP_PATCH) event("git diff --no-ext-diff --no-textconv --unified=3 "+process.env.CODEX_FIXTURE_BASE+" "+head+" --","diff --git a/version.txt b/version.txt\\n-base\\n+final");
+if (!process.env.CODEX_FIXTURE_SKIP_PATCH) event("git diff --no-ext-diff --no-textconv --unified=3 "+process.env.CODEX_FIXTURE_BASE+" "+head+" --",cp.execFileSync("git",["diff","--no-ext-diff","--no-textconv","--unified=3",process.env.CODEX_FIXTURE_BASE,head,"--"],{encoding:"utf8"}));
 fs.writeFileSync(process.argv[process.argv.indexOf("--output-last-message")+1],process.env.CODEX_DECISION_JSON);
 `,
   );

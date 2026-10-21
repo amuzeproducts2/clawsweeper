@@ -2094,7 +2094,7 @@ test("repaired heads wait for checks, then require exact-head review, then becom
       },
       repairState,
     ).status,
-    "ready",
+    "review",
   );
   assert.equal(
     agentRepairReadiness(
@@ -3699,7 +3699,15 @@ test("large reviewed PRs do not inherit repair worker limits, but retain merge g
     stats: { files: 80, additions: 9000, deletions: 2000 },
     checks: passingChecks(),
     reviewThreads: [],
-    conversationComments: [agentPass()],
+    conversationComments: [
+      {
+        ...agentPass(),
+        body: agentPass().body.replace(
+          "evidence=verified-v4",
+          "evidence=verified-v4 patch=complete-v1",
+        ),
+      },
+    ],
     reviews: [{ user: { login: "macroscopeapp[bot]" }, state: "APPROVED", commit_id: headSha }],
   };
   const state = { status: "reviewed", reviewedSha: headSha };
@@ -3712,6 +3720,14 @@ test("large reviewed PRs do not inherit repair worker limits, but retain merge g
       "routine",
     ).status;
   assert.equal(ready(), "ready");
+  assert.equal(ready({ conversationComments: [agentPass()] }), "review");
+  for (const name of [
+    "merge-risk: 🚨 compatibility",
+    "merge-risk: 🚨 availability",
+    "merge-risk: 🚨 automation",
+  ]) {
+    assert.equal(ready({ pr: { ...inspection.pr, labels: [{ name }] } }), "human");
+  }
   assert.equal(ready({ checks: [] }), "waiting");
   assert.equal(ready({ conversationComments: [] }), "review");
   assert.equal(ready({ conversationComments: [agentPass("oldhead")] }), "review");
@@ -3722,7 +3738,10 @@ test("large reviewed PRs do not inherit repair worker limits, but retain merge g
 test("workflow merge requires explicit verified exact-head security clearance", () => {
   const cleared = {
     ...agentPass(),
-    body: agentPass().body.replace("evidence=verified-v4", "evidence=verified-v4 security=cleared"),
+    body: agentPass().body.replace(
+      "evidence=verified-v4",
+      "evidence=verified-v4 security=cleared patch=complete-v1",
+    ),
   };
   const inspection = {
     pr: pullRequest({ reviewDecision: "APPROVED", files: [{ path: ".github/workflows/ci.yml" }] }),
