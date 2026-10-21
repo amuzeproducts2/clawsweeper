@@ -1495,12 +1495,29 @@ function reviewRetryDecision(state, inspection, now = Date.now()) {
   return { attempts, retry: !nextRetryAt || now >= Date.parse(nextRetryAt), nextRetryAt };
 }
 
+function freshReviewFailureReport(path, startedAt, previousMtime) {
+  try {
+    const modified = statSync(path).mtimeMs;
+    if (modified < startedAt || modified === previousMtime) return "";
+    const report = readFileSync(path, "utf8");
+    const frontmatter = report.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? "";
+    if (!/^review_status: failed$/m.test(frontmatter)) return "";
+    // Only the failure writer's diagnostic fields are evidence, not PR prose.
+    return [...report.matchAll(/^- \*\*codex (?:stderr|failure detail):\*\* (.*)$/gm)]
+      .map((match) => match[1])
+      .join("\n");
+  } catch {
+    // Missing/unreadable diagnostics must not mask the primary exception.
+    return "";
+  }
+}
+
 function reviewFailureReason(error, report = "") {
   // The report contains the underlying model error; the subprocess exception
   // otherwise contains only a long command and the generic review failure.
   if (
     /workspace routing discovery unauthorized|Failed to refresh token|access token could not be refreshed/i.test(
-      report,
+      `${String(error?.message ?? error)}\n${report}`,
     )
   ) {
     return "Codex authentication failed (401/token refresh); repair the existing reviewer login. No code review was completed.";
@@ -3783,6 +3800,11 @@ function reviewItem({
     CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: "1",
   };
   const repairEvidence = readRepairState(repo, number);
+  const failureReportPath = join(reviewDir, `${number}.md`);
+  const previousReportMtime = existsSync(failureReportPath)
+    ? statSync(failureReportPath).mtimeMs
+    : null;
+  const reviewStartedAt = Date.now();
   try {
     run(
       "node",
@@ -3912,9 +3934,7 @@ function reviewItem({
       attempts: reviewAttempts + 1,
       reason: reviewFailureReason(
         error,
-        existsSync(join(reviewDir, `${number}.md`))
-          ? readFileSync(join(reviewDir, `${number}.md`), "utf8")
-          : "",
+        freshReviewFailureReport(failureReportPath, reviewStartedAt, previousReportMtime),
       ),
     });
     let latestPullRequest;
@@ -4590,6 +4610,7 @@ function main() {
 }
 
 export {
+  freshReviewFailureReport,
   reviewRetryDecision,
   reviewFailureReason,
   actionableReviewThreads,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  utimesSync,
   chmodSync,
   cpSync,
   existsSync,
@@ -17,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  freshReviewFailureReport,
   reviewRetryDecision,
   reviewFailureReason,
   actionableReviewThreads,
@@ -3636,4 +3638,41 @@ test("review diagnostics retain the cause instead of truncating to a long comman
     ),
     /private material/,
   );
+});
+
+test("only newly written diagnostic fields can diagnose the current failed attempt", () => {
+  const root = mkdtempSync(join(tmpdir(), "clawsweeper-fresh-diagnostics-"));
+  const path = join(root, "93.md");
+  const now = Date.now();
+  const header = "---\nreview_status: failed\n---\n";
+  writeFileSync(path, header + "- **codex stderr:** Failed to refresh token: private material");
+  utimesSync(path, new Date(now - 2000), new Date(now - 2000));
+  const previous = statSync(path).mtimeMs;
+  assert.equal(freshReviewFailureReport(path, now, previous), "");
+  assert.equal(freshReviewFailureReport(path, now - 3000, previous), "");
+  writeFileSync(
+    path,
+    header +
+      "# PR description\nFailed to refresh token: quoted prose\n- **codex stderr:** process timed out",
+  );
+  utimesSync(path, new Date(now + 1000), new Date(now + 1000));
+  const diagnostic = freshReviewFailureReport(path, now, previous);
+  assert.equal(diagnostic, "process timed out");
+  assert.equal(reviewFailureReason(new Error("current timeout"), diagnostic), "current timeout");
+  assert.equal(freshReviewFailureReport(join(root, "missing.md"), now, null), "");
+  writeFileSync(path, header + "- **codex stderr:** Failed to refresh token: private material");
+  utimesSync(path, new Date(now + 2000), new Date(now + 2000));
+  assert.match(
+    reviewFailureReason(
+      new Error("generic failure"),
+      freshReviewFailureReport(path, now, previous),
+    ),
+    /authentication failed/,
+  );
+});
+
+test("message-only authentication failures are redacted even without a fresh report", () => {
+  const reason = reviewFailureReason(new Error("Failed to refresh token: private material"));
+  assert.match(reason, /authentication failed/);
+  assert.doesNotMatch(reason, /private material/);
 });
