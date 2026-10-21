@@ -91,6 +91,7 @@ fs.appendFileSync(path, JSON.stringify({
 	  planFailures: parsed?.planFailures ?? null,
 	  reviewAttempts: parsed?.reviewAttempts ?? null,
 	  reviewFailures: parsed?.reviewFailures ?? null,
+	  reviewRecoveryPending: parsed?.reviewRecoveryPending ?? null,
 	  repositoriesVisited: parsed?.repositoriesVisited ?? null,
   noProgressStreak: parsed?.noProgressStreak ?? null,
   maxRepoServiceAgeSeconds: parsed?.maxRepoServiceAgeSeconds ?? null,

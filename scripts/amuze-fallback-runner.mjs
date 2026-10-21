@@ -822,6 +822,7 @@ function updateRunState(
     eligibleItems = 0,
     planFailures = 0,
     reviewFailures = 0,
+    reviewRecoveryPending = 0,
     cursorRepo = undefined,
   },
 ) {
@@ -864,6 +865,7 @@ function updateRunState(
       eligibleItems: Number(eligibleItems) || 0,
       planFailures: Number(planFailures) || 0,
       reviewFailures: Number(reviewFailures) || 0,
+      reviewRecoveryPending: Number(reviewRecoveryPending) || 0,
     },
   };
 }
@@ -991,6 +993,7 @@ function renderRunMetrics({
   planFailures,
   reviewAttempts,
   reviewFailures,
+  reviewRecoveryPending = 0,
   noProgressStreak,
   maxRepoServiceAgeSeconds,
 }) {
@@ -1041,6 +1044,9 @@ function renderRunMetrics({
     "# HELP clawsweeper_orchestrator_review_failures Pull-request reviews that failed in the last run.",
     "# TYPE clawsweeper_orchestrator_review_failures gauge",
     `clawsweeper_orchestrator_review_failures ${Number(reviewFailures) || 0}`,
+    "# HELP clawsweeper_orchestrator_review_recovery_pending Failed reviews waiting for bounded technical recovery.",
+    "# TYPE clawsweeper_orchestrator_review_recovery_pending gauge",
+    `clawsweeper_orchestrator_review_recovery_pending ${Number(reviewRecoveryPending) || 0}`,
     "# HELP clawsweeper_orchestrator_no_progress_streak Consecutive runs with actionable attempts but no state-changing progress.",
     "# TYPE clawsweeper_orchestrator_no_progress_streak gauge",
     `clawsweeper_orchestrator_no_progress_streak ${Number(noProgressStreak) || 0}`,
@@ -1465,6 +1471,42 @@ function writeReviewState(repo, number, state) {
     ...state,
     reviewedAt: new Date().toISOString(),
   });
+}
+
+// Failed infrastructure reviews retain ownership and retry at a bounded rate.
+// Completed verdicts are checked first by reviewStateIsCurrent: a cooldown is
+// never authority to override a real review, risk label, or merge gate.
+function reviewRetryDecision(state, inspection, now = Date.now()) {
+  const fingerprint = mergeSignalFingerprint(inspection);
+  const sameEvidence =
+    state.headSha === inspection.pr.headRefOid && state.attemptFingerprint === fingerprint;
+  const attempts =
+    sameEvidence && Number.isFinite(Number(state.attempts))
+      ? Math.max(0, Math.floor(Number(state.attempts)))
+      : 0;
+  if (attempts < 2) return { attempts, retry: true, nextRetryAt: null };
+  const delayMs = Math.min(24, 2 ** Math.min(5, attempts - 2)) * 60 * 60 * 1000;
+  const lastAttempt = Date.parse(state.reviewedAt);
+  // Legacy missing/invalid timestamps must not strand an item permanently.
+  const nextRetryAt =
+    Number.isFinite(lastAttempt) && lastAttempt <= now
+      ? new Date(lastAttempt + delayMs).toISOString()
+      : null;
+  return { attempts, retry: !nextRetryAt || now >= Date.parse(nextRetryAt), nextRetryAt };
+}
+
+function reviewFailureReason(error, report = "") {
+  // The report contains the underlying model error; the subprocess exception
+  // otherwise contains only a long command and the generic review failure.
+  if (
+    /workspace routing discovery unauthorized|Failed to refresh token|access token could not be refreshed/i.test(
+      report,
+    )
+  ) {
+    return "Codex authentication failed (401/token refresh); repair the existing reviewer login. No code review was completed.";
+  }
+  const message = String(error?.message ?? error);
+  return message.length > 1000 ? message.slice(-1000) : message;
 }
 
 function reviewStateIsCurrent(state, inspection) {
@@ -3685,16 +3727,14 @@ function reviewItem({
     };
   }
   const evidenceFingerprint = mergeSignalFingerprint(inspection);
-  const reviewAttempts =
-    reviewState.headSha === inspection.pr.headRefOid &&
-    reviewState.attemptFingerprint === evidenceFingerprint
-      ? Number(reviewState.attempts ?? 0)
-      : 0;
-  if (reviewAttempts >= 2) {
+  const retryDecision = reviewRetryDecision(reviewState, inspection);
+  const reviewAttempts = retryDecision.attempts;
+  if (!retryDecision.retry) {
     return {
       mode: "agent-owned",
       status: "agent_review_retry_exhausted",
-      reason: "review budget exhausted for unchanged head and evidence; rearmed by new evidence",
+      reason: reviewState.reason || "technical review failure awaiting bounded recovery",
+      nextRetryAt: retryDecision.nextRetryAt,
     };
   }
   writeReviewState(repo, number, {
@@ -3870,7 +3910,12 @@ function reviewItem({
       headSha: inspection.pr.headRefOid,
       attemptFingerprint: evidenceFingerprint,
       attempts: reviewAttempts + 1,
-      reason: String(error.message).slice(0, 1000),
+      reason: reviewFailureReason(
+        error,
+        existsSync(join(reviewDir, `${number}.md`))
+          ? readFileSync(join(reviewDir, `${number}.md`), "utf8")
+          : "",
+      ),
     });
     let latestPullRequest;
     try {
@@ -3943,7 +3988,7 @@ function reviewItem({
       `clawsweeper:${repo}#${number}`,
       "unexpected",
       fallbackState
-        ? `Exact-head review failed; recovery remains agent-owned within the two-attempt evidence budget: ${error.message}`
+        ? `Exact-head review failed; recovery remains agent-owned with bounded backoff: ${error.message}`
         : `Exact-head frontier review failed and remains retry eligible: ${error.message}`,
       { failure_family: "frontier-review-failed", pr_number: number },
     );
@@ -3986,10 +4031,15 @@ function statusConsumesAction(status) {
   ].includes(status);
 }
 
-function runOutcomeSuccess({ planFailures, reviewAttempts, reviewFailures }) {
+function runOutcomeSuccess({
+  planFailures,
+  reviewAttempts,
+  reviewFailures,
+  reviewRecoveryPending = 0,
+}) {
   const planningFailure = planFailures > 0;
   const totalReviewFailure = reviewAttempts > 0 && reviewFailures === reviewAttempts;
-  return !planningFailure && !totalReviewFailure;
+  return !planningFailure && !totalReviewFailure && reviewRecoveryPending === 0;
 }
 
 function readSchedulerState(now) {
@@ -4136,6 +4186,7 @@ function main() {
   let planFailures = 0;
   let reviewAttempts = 0;
   let reviewFailures = 0;
+  let reviewRecoveryPending = 0;
   let stopReason = null;
   const summary = [];
   const visitedRepos = [];
@@ -4421,6 +4472,7 @@ function main() {
         if (["agent_review_failed", "agent_review_incomplete"].includes(status)) {
           reviewFailures += 1;
         }
+        if (status === "agent_review_retry_exhausted") reviewRecoveryPending += 1;
         if (statusMakesProgress(status)) progress += 1;
         if (status === "agent_review_unchanged") unchangedReviewSkips += 1;
         summary.push({ repo, number, status, ...result });
@@ -4456,6 +4508,7 @@ function main() {
       eligibleItems,
       planFailures,
       reviewFailures,
+      reviewRecoveryPending,
       cursorRepo: currentRunState.cursorRepo,
     },
   );
@@ -4479,6 +4532,7 @@ function main() {
     planFailures,
     reviewAttempts,
     reviewFailures,
+    reviewRecoveryPending,
   });
   if (metricsPath) {
     writePrometheusTextfile(
@@ -4499,6 +4553,7 @@ function main() {
         planFailures,
         reviewAttempts,
         reviewFailures,
+        reviewRecoveryPending,
         noProgressStreak: runState.noProgressStreak,
         maxRepoServiceAgeSeconds,
       }),
@@ -4518,6 +4573,7 @@ function main() {
         planFailures,
         reviewAttempts,
         reviewFailures,
+        reviewRecoveryPending,
         repositoriesVisited: visitedRepos.length,
         noProgressStreak: runState.noProgressStreak,
         maxRepoServiceAgeSeconds,
@@ -4534,6 +4590,8 @@ function main() {
 }
 
 export {
+  reviewRetryDecision,
+  reviewFailureReason,
   actionableReviewThreads,
   agentRepairReadiness,
   autoMergeDependabotBlocker,

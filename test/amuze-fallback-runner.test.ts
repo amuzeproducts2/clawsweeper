@@ -17,6 +17,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  reviewRetryDecision,
+  reviewFailureReason,
   actionableReviewThreads,
   verifyCommittedRepair,
   finalRegressionSandboxArgs,
@@ -3519,4 +3521,119 @@ test("only the identified activity notification is excluded from code validation
     { name: "Macroscope correctness", state: "SKIPPED", bucket: "skipping" },
   ])
     assert.equal(allRequiredSignalsGreen(validationChecks([ci, check])), false);
+});
+
+test("technical review failures recover unchanged heads with bounded exponential backoff", () => {
+  const now = Date.parse("2026-10-21T05:00:00Z");
+  const inspection = { pr: { headRefOid: headSha }, checks: [] };
+  const state = {
+    status: "agent_owned",
+    verdict: "needs-repair",
+    headSha,
+    attemptFingerprint: mergeSignalFingerprint(inspection),
+    attempts: 2,
+    reviewedAt: "2026-10-21T04:30:00Z",
+  };
+  assert.equal(reviewRetryDecision(state, inspection, now).retry, false);
+  assert.equal(reviewRetryDecision(state, inspection, now).nextRetryAt, "2026-10-21T05:30:00.000Z");
+  assert.equal(reviewRetryDecision(state, inspection, now + 30 * 60_000).retry, true);
+  assert.equal(
+    reviewRetryDecision({ ...state, attempts: 3 }, inspection, now).nextRetryAt,
+    "2026-10-21T06:30:00.000Z",
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, attempts: 200 }, inspection, now).nextRetryAt,
+    "2026-10-22T04:30:00.000Z",
+  );
+  assert.equal(reviewRetryDecision({ ...state, headSha: "old" }, inspection, now).attempts, 0);
+  assert.equal(
+    reviewRetryDecision({ ...state, attemptFingerprint: "old" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, reviewedAt: "invalid" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(
+    reviewRetryDecision({ ...state, reviewedAt: "2099-01-01" }, inspection, now).retry,
+    true,
+  );
+  assert.equal(reviewStateIsCurrent(state, inspection), false);
+  for (const verdict of ["needs-human", "pass", "needs-repair"]) {
+    assert.equal(
+      reviewStateIsCurrent(
+        {
+          ...state,
+          status: "complete",
+          verdict,
+          evidenceFingerprint: mergeSignalFingerprint(inspection),
+        },
+        inspection,
+      ),
+      true,
+    );
+  }
+});
+
+test("deferred technical review failures cannot report a healthy run or consume model actions", () => {
+  assert.equal(statusConsumesAction("agent_review_retry_exhausted"), false);
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 0,
+      reviewFailures: 0,
+      reviewRecoveryPending: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 1,
+      reviewFailures: 0,
+      reviewRecoveryPending: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    runOutcomeSuccess({
+      planFailures: 0,
+      reviewAttempts: 0,
+      reviewFailures: 0,
+      reviewRecoveryPending: 0,
+    }),
+    true,
+  );
+  assert.match(
+    renderRunMetrics({ reviewRecoveryPending: 2 }),
+    /clawsweeper_orchestrator_review_recovery_pending 2/,
+  );
+});
+
+test("review diagnostics retain the cause instead of truncating to a long command", () => {
+  assert.match(
+    reviewFailureReason(new Error("node " + "x".repeat(2000) + "\nactual failure")),
+    /actual failure$/,
+  );
+  assert.match(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "workspace routing discovery unauthorized (401)",
+    ),
+    /Codex authentication failed/,
+  );
+  assert.match(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "Failed to refresh token: private material",
+    ),
+    /token refresh/,
+  );
+  assert.doesNotMatch(
+    reviewFailureReason(
+      new Error("generic subprocess failure"),
+      "Failed to refresh token: private material",
+    ),
+    /private material/,
+  );
 });
