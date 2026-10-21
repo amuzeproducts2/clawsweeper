@@ -14000,7 +14000,14 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   const decision = frontMatterValue(markdown, "decision");
   const confidence = frontMatterValue(markdown, "confidence") ?? "unknown";
   const headSha = pullHeadShaFromReport(markdown) ?? "unknown";
+  const verifiedSecurityClearance =
+    frontMatterValue(markdown, "review_execution_version") === "4" &&
+    frontMatterValue(markdown, "local_review_head_sha") === headSha &&
+    hasVerifiedLocalCheckoutAccess(markdown) &&
+    reportSecurityReview(markdown).status === "cleared" &&
+    reportSecurityReview(markdown).concerns.length === 0;
   const baseAttrs = [
+    ...(verifiedSecurityClearance ? ["security=cleared"] : []),
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
