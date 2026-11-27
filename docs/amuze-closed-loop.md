@@ -193,6 +193,13 @@ repair, spam, dashboard and reporting workflows are not used here, because the
 runner on the Amuze host replaces them. Leave them disabled; re-enabling the
 schedules is what triggered the pause.
 
-`main` requires the CI and release-bundle checks before merge. If a pull
+`main` requires three checks before merge, for everyone including admins:
+`pnpm check` (CI), and `build` and `transport-smoke` (release bundle). If a pull
 request shows no checks at all, look at the Actions tab for the pause banner
 before assuming the checks passed.
+
+`pnpm check` runs the full test suite once and takes about a minute. A pull
+request that only changes documentation (`docs/`, `README.md`, `CHANGELOG.md`,
+`LICENSE`) runs the documentation check and skips build, tests and bundle; the
+three required jobs still report. `scripts/ci-change-scope.sh` makes that
+decision and treats anything it does not recognise as code.
