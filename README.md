@@ -598,8 +598,12 @@ pnpm run oxformat
 `oxformat` is an alias for `oxfmt`; there is no separate `oxformat` pnpm package.
 The `CI` GitHub Actions workflow uses the latest Node release and runs
 `pnpm run check` on pushes, pull requests, and manual dispatches. The check gate
-includes the full test suite, a strict changed-surface coverage threshold, and a
-full compiled-repo coverage ratchet.
+runs the full test suite once, under the compiled-repo coverage ratchet, plus a
+strict coverage threshold for the changed surface measured from that file's own
+tests. A pull request that only changes documentation (`docs/`, `README.md`,
+`CHANGELOG.md`, `LICENSE`; see `scripts/ci-change-scope.sh`) runs the
+documentation check and skips the build and tests. The `Release bundle` workflow
+builds and smoke-tests the bundle and does not repeat the test gate.
 
 ## GitHub Actions Setup
 
