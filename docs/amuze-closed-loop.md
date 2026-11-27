@@ -176,3 +176,23 @@ reason. Other long subprocess failures retain their error tail, not only the
 command prefix. Restore the existing reviewer login through the authorized
 credential procedure for a 401/refresh failure; do not rotate credentials or
 remove review gates as an automated workaround.
+
+## GitHub Actions in this fork
+
+This fork inherited the upstream project's workflows, including several on
+five-minute schedules. GitHub paused Actions for the repository ("not currently
+being run on this fork due to the scale of GitHub Actions usage"): push and
+pull-request runs stopped on 2026-10-01 and every run on 2026-10-09. While
+paused, the repository API still reports Actions as enabled, and a manual
+dispatch fails with "Actions has been disabled for this repository".
+
+Since 2026-11-27 only three workflows are enabled: `ci.yml` (`pnpm check`),
+`release-bundle.yml` (build and transport smoke) and `codeql.yml`. The other 22
+are disabled in the repository settings, not deleted. The scheduled sweep,
+repair, spam, dashboard and reporting workflows are not used here, because the
+runner on the Amuze host replaces them. Leave them disabled; re-enabling the
+schedules is what triggered the pause.
+
+`main` requires the CI and release-bundle checks before merge. If a pull
+request shows no checks at all, look at the Actions tab for the pause banner
+before assuming the checks passed.
