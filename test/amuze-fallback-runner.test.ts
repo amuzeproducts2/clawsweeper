@@ -1096,6 +1096,7 @@ for cycle in 0 1 2 3; do
   "\${TEST_NODE}" "\${entrypoint}" "$@" > "\${TEST_ROOT}/output-\${cycle}.json" 2> "\${TEST_ROOT}/error-\${cycle}.log"
   printf '%s\\n' "$?" > "\${TEST_ROOT}/status-\${cycle}"
   cp "\${CLAWSWEEPER_SCHEDULER_STATE_PATH}" "\${TEST_ROOT}/state-\${cycle}.json"
+  cp "\${CLAWSWEEPER_METRICS_PATH}" "\${TEST_ROOT}/metrics-\${cycle}.prom"
 done
 `,
   );
@@ -1137,27 +1138,35 @@ done
     states.push(JSON.parse(readFileSync(join(testRoot, `state-${cycle}.json`), "utf8")));
   }
 
+  // Every routine attempt advances the attempt cursor (2026-11-24 fairness fix), so the
+  // failing repository is retried every other cycle and its failure does not use up the
+  // cycle: the next routine repository is still serviced in the same run.
   assert.deepEqual(
     results.map((result) => result.output.planFailures),
-    [1, 0, 0, 1],
+    [1, 0, 1, 0],
   );
   assert.deepEqual(
     results.map((result) => result.status),
-    [1, 0, 0, 1],
+    [1, 0, 1, 0],
     results.map((result) => result.stderr).join("\n"),
   );
   assert.deepEqual(
     states.map((state) => state.attemptCursorRepo),
     [
-      "amuzeproducts2/bravo",
       "amuzeproducts2/charlie",
       "amuzeproducts2/delta",
-      "amuzeproducts2/bravo",
+      "amuzeproducts2/charlie",
+      "amuzeproducts2/delta",
     ],
   );
   assert.deepEqual(
     states.map((state) => state.cursorRepo),
-    [null, "amuzeproducts2/charlie", "amuzeproducts2/delta", "amuzeproducts2/delta"],
+    [
+      "amuzeproducts2/charlie",
+      "amuzeproducts2/delta",
+      "amuzeproducts2/charlie",
+      "amuzeproducts2/delta",
+    ],
     "successful-service cursor must not credit the failed fairness repository",
   );
   const state = states.at(-1);
@@ -1180,14 +1189,24 @@ done
       "a failed plan is not successful repository service",
     );
   }
-  const metrics = readFileSync(metricsPath, "utf8");
-  assert.match(metrics, /clawsweeper_orchestrator_last_run_success 0/);
-  assert.match(metrics, /clawsweeper_orchestrator_plan_failures 1/);
-  assert.match(
-    metrics,
-    /clawsweeper_orchestrator_max_repo_service_age_seconds [1-9][0-9]*/,
-    "persistent plan failure must continue aging toward the repository-starvation alert",
-  );
+  // A cycle that hit the persistent failure reports unhealthy, even though a later cycle recovers.
+  results.forEach((result, cycle) => {
+    const cycleMetrics = readFileSync(join(testRoot, `metrics-${cycle}.prom`), "utf8");
+    const failed = result.output.planFailures > 0;
+    assert.match(
+      cycleMetrics,
+      new RegExp(`clawsweeper_orchestrator_last_run_success ${failed ? 0 : 1}\\n`),
+    );
+    assert.match(
+      cycleMetrics,
+      new RegExp(`clawsweeper_orchestrator_plan_failures ${failed ? 1 : 0}\\n`),
+    );
+    assert.match(
+      cycleMetrics,
+      /clawsweeper_orchestrator_max_repo_service_age_seconds [1-9][0-9]*/,
+      "persistent plan failure must continue aging toward the repository-starvation alert",
+    );
+  });
 });
 
 test(
