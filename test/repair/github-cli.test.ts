@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { githubLimitedPagePath, githubPaginatedPath } from "../../dist/repair/github-cli.js";
+import {
+  ghRetryDelayMs,
+  githubLimitedPagePath,
+  githubPaginatedPath,
+} from "../../dist/repair/github-cli.js";
 
 test("githubPaginatedPath requests maximum REST page size by default", () => {
   assert.equal(
@@ -35,4 +39,20 @@ test("githubLimitedPagePath caps one REST page and preserves existing filters", 
     githubLimitedPagePath("repos/openclaw/openclaw/pulls/123/files", 0, 0),
     "repos/openclaw/openclaw/pulls/123/files?per_page=1&page=1",
   );
+});
+
+test("gh retry backoff keeps its production schedule unless a base delay is configured", () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 6, 9].map((attempt) => ghRetryDelayMs(attempt, {})),
+    [1000, 2000, 3000, 4000, 5000, 5000, 5000],
+  );
+  assert.deepEqual(
+    [1, 3, 9].map((attempt) =>
+      ghRetryDelayMs(attempt, { CLAWSWEEPER_GH_RETRY_BASE_DELAY_MS: "1" }),
+    ),
+    [1, 3, 5],
+  );
+  for (const invalid of ["-5", "soon", "NaN"]) {
+    assert.equal(ghRetryDelayMs(2, { CLAWSWEEPER_GH_RETRY_BASE_DELAY_MS: invalid }), 2000);
+  }
 });

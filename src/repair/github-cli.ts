@@ -132,7 +132,7 @@ export function ghPagedLimitWithRetry<T = JsonValue>(
     } catch (error) {
       lastError = error;
       if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      sleepMs(Math.min(1000 * attempt, 5000));
+      sleepMs(ghRetryDelayMs(attempt));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -160,7 +160,7 @@ export function ghTextWithRetry(ghArgs: string[], options: GhRetryOptions | numb
     } catch (error) {
       lastError = error;
       if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      sleepMs(Math.min(1000 * attempt, 5000));
+      sleepMs(ghRetryDelayMs(attempt));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -179,7 +179,7 @@ export async function ghTextWithRetryAsync(
     } catch (error) {
       lastError = error;
       if (attempt >= attempts || !shouldRetryGh(error)) throw error;
-      await sleepAsync(Math.min(1000 * attempt, 5000));
+      await sleepAsync(ghRetryDelayMs(attempt));
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -301,6 +301,14 @@ function githubPathWithQueryDefaults(
 function bufferLikeToString(value: unknown): string {
   if (Buffer.isBuffer(value)) return value.toString("utf8");
   return String(value ?? "");
+}
+
+// Linear backoff capped at five steps: 1s, 2s, 3s, 4s, 5s by default. Tests set
+// CLAWSWEEPER_GH_RETRY_BASE_DELAY_MS so they do not sit through real backoff.
+export function ghRetryDelayMs(attempt: number, env: NodeJS.ProcessEnv = process.env): number {
+  const configured = Number(env.CLAWSWEEPER_GH_RETRY_BASE_DELAY_MS ?? 1000);
+  const base = Number.isFinite(configured) && configured >= 0 ? configured : 1000;
+  return Math.min(base * attempt, base * 5);
 }
 
 function sleepMs(ms: number): void {
