@@ -1239,6 +1239,8 @@ function runApplyResult(
       CLAWSWEEPER_PR_CLOSE_COVERAGE_PROOF_TIMEOUT_MS: "10000",
       GH_TOKEN: "write-token",
       PATH: `${paths.binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+      // Retries still happen; only the backoff between them is shortened.
+      CLAWSWEEPER_GH_RETRY_BASE_DELAY_MS: "1",
       PR_CLOSE_COVERAGE_PROOF_DECISION: options.proofDecision,
       PR_CLOSE_COVERAGE_PROOF_EXPECT_PROMPT: options.expectedPromptIncludes ?? "",
       PR_CLOSE_COVERAGE_PROOF_UNEXPECTED_PROMPT: options.unexpectedPromptIncludes ?? "",

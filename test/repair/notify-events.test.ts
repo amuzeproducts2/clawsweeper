@@ -380,6 +380,7 @@ test("runClawSweeperEventNotifier covers skip, config, dry-run, and strict failu
   const failed = await runClawSweeperEventNotifier(["--run-id", "987", "--strict"], {
     root,
     fetch: async () => new Response("nope", { status: 500 }),
+    sleep: async () => undefined,
     log: () => undefined,
     env: {
       CLAWSWEEPER_OPENCLAW_HOOK_URL: "https://claw.example/hooks",

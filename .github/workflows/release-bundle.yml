@@ -12,23 +12,43 @@ permissions:
   issues: read
   pull-requests: read
 
+concurrency:
+  group: release-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
     steps:
       - uses: actions/checkout@v6
+      # Documentation-only pull requests change nothing in the bundle, so the job
+      # reports without building. The job names are required status checks.
+      - name: Classify change
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          scope=code
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)' || true)"
+            scope="$(printf '%s\n' "${files}" | scripts/ci-change-scope.sh)"
+          fi
+          echo "scope=${scope}" >> "${GITHUB_OUTPUT}"
+          echo "Change scope: ${scope}"
       - uses: ./.github/actions/setup-pnpm
-      - name: Install Prometheus metric tooling
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y prometheus
-      - name: Build and test
-        run: |
-          pnpm run check
+        if: steps.scope.outputs.scope == 'code'
+      # The full test gate runs once, in the CI workflow's required "pnpm check" job.
       - name: Build immutable release
+        if: steps.scope.outputs.scope == 'code'
         run: scripts/build-release.sh "${RUNNER_TEMP}/clawsweeper-release"
       - name: Read-only production-plan smoke
+        if: steps.scope.outputs.scope == 'code'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -43,8 +63,10 @@ jobs:
           node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' \
             "${RUNNER_TEMP}/plan-smoke.json"
       - name: Reverify after smoke
+        if: steps.scope.outputs.scope == 'code'
         run: "${RUNNER_TEMP}/clawsweeper-release/scripts/verify-release.sh ${RUNNER_TEMP}/clawsweeper-release"
       - name: Package immutable transport archive
+        if: steps.scope.outputs.scope == 'code'
         run: |
           archive="clawsweeper-release-${GITHUB_SHA}.tgz"
           tar -C "${RUNNER_TEMP}" -czf "${RUNNER_TEMP}/${archive}" \
@@ -54,6 +76,7 @@ jobs:
             sha256sum "${archive}" > "${archive}.sha256"
           )
       - uses: actions/upload-artifact@v7
+        if: steps.scope.outputs.scope == 'code'
         with:
           name: clawsweeper-release-${{ github.sha }}
           path: |
@@ -67,10 +90,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/download-artifact@v7
+        if: needs.build.outputs.scope == 'code'
         with:
           name: clawsweeper-release-${{ github.sha }}
           path: ${{ runner.temp }}/transport
       - name: Verify transported archive and executable modes
+        if: needs.build.outputs.scope == 'code'
         run: |
           cd "${RUNNER_TEMP}/transport"
           sha256sum --check "clawsweeper-release-${GITHUB_SHA}.tgz.sha256"

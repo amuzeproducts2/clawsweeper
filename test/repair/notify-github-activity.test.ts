@@ -488,6 +488,7 @@ test("runGithubActivityNotifier covers skip, dry-run, deliver, and failure paths
   const failed = await runGithubActivityNotifier(["--strict"], {
     root,
     fetch: async () => new Response("nope", { status: 500 }),
+    sleep: async () => undefined,
     log: () => undefined,
     env: {
       GITHUB_EVENT_PATH: eventPath,

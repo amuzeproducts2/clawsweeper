@@ -69,6 +69,7 @@ export type ClawSweeperEventNotifierRuntime = {
   fetch?: typeof fetch;
   now?: () => Date;
   log?: (message: string) => void;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 const DEFAULT_INPUT_PATH = "repair-apply-report.json";
@@ -364,6 +365,7 @@ export async function runClawSweeperEventNotifier(
       const result = await postOpenClawAgentHook({
         config,
         fetcher,
+        ...(runtime.sleep ? { sleep: runtime.sleep } : {}),
         post: {
           name: eventName(event),
           message: renderClawSweeperEventMessage(event),

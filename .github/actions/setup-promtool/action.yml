@@ -1,0 +1,41 @@
+name: Setup promtool
+description: Install a pinned promtool from the upstream Prometheus release, verified by checksum and cached.
+inputs:
+  version:
+    description: Prometheus release that ships promtool. Matches the distribution package used on the Amuze host.
+    default: "2.45.3"
+  sha256:
+    description: SHA-256 of prometheus-<version>.linux-amd64.tar.gz from the release's sha256sums.txt.
+    default: "53b23de673c54bf6eeac13f17fe14027e8fe7800d0cf361e3177ba96413812b8"
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v5
+      with:
+        path: ~/.local/promtool
+        key: promtool-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+
+    - name: Download and verify promtool
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        PROMETHEUS_VERSION: ${{ inputs.version }}
+        PROMETHEUS_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        archive="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+        curl -fsSL --retry 3 --retry-delay 2 -o "${RUNNER_TEMP}/${archive}" \
+          "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${archive}"
+        echo "${PROMETHEUS_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check --strict
+        install -d "${HOME}/.local/promtool"
+        tar -xzf "${RUNNER_TEMP}/${archive}" -C "${HOME}/.local/promtool" --strip-components=1 \
+          "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+        rm -f "${RUNNER_TEMP}/${archive}"
+
+    - name: Put promtool on PATH
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "${HOME}/.local/promtool" >> "${GITHUB_PATH}"
+        "${HOME}/.local/promtool/promtool" --version

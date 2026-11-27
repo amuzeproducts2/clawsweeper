@@ -46,6 +46,7 @@ export type GithubActivityNotifierRuntime = {
   fetch?: typeof fetch;
   now?: () => Date;
   log?: (message: string) => void;
+  sleep?: (ms: number) => Promise<void>;
 };
 
 const DEFAULT_REPORT_PATH = "notifications/github-activity-report.json";
@@ -341,6 +342,7 @@ export async function runGithubActivityNotifier(
       const result = await postOpenClawAgentHook({
         config,
         fetcher,
+        ...(runtime.sleep ? { sleep: runtime.sleep } : {}),
         post: {
           name: `GitHub ${activity.type} ${activity.repo}`,
           message: renderGithubActivityMessage(activity, config.discordTarget),
