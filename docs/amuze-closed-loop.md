@@ -28,6 +28,11 @@ repository or unchanged pull-request head to monopolize every cycle.
 - `REPO_MAINTENANCE_MAX_ACTIONS` defaults to two and
   `REPO_MAINTENANCE_MAX_RUNTIME_SECONDS` defaults to 780. The runner
   checkpoints after each repository and item before either budget can stop it.
+- `CLAWSWEEPER_CODEX_TIMEOUT_MS` defaults to 600000 (ten minutes) for one Codex
+  review or repair. It is always capped by what is left of the run budget, so
+  raising it only helps together with `REPO_MAINTENANCE_MAX_RUNTIME_SECONDS`.
+  Production sets 1200000 and 1560 because a 94-chunk review (280 KB diff) can
+  take more than ten minutes; keep the sum below the unit's `TimeoutStartSec`.
 - Pull requests rotate within each repository. The runner checkpoints the item
   cursor and an in-flight attempt before starting a blocking review. A crashed
   attempt holds a 30-minute retry lease; peers rotate ahead of it during the

@@ -4,6 +4,10 @@ export function checkoutDiffCommand(baseSha: string, headSha: string): string {
 
 // Keep each mandatory read below the 6,000-token tool output ceiling, including
 // minified/Unicode patches. Compare every byte-derived chunk with trusted git output.
+// Each chunk is one full-block read and a single write. The earlier `dd bs=1` form
+// wrote 3,000 one-byte chunks, and Codex 0.156 output capture drops data under that
+// flood (about 8% of reads came back short or empty with exit 0), so a diff of more
+// than a few chunks could never produce complete evidence.
 export function patchInspectionPages(
   baseSha: string,
   headSha: string,
@@ -15,7 +19,7 @@ export function patchInspectionPages(
   const pages: CommandEvidence[] = [];
   for (let offset = 0; offset < bytes.length; offset += 3000) {
     pages.push({
-      command: `${command} | dd bs=1 skip=${offset} count=3000 status=none`,
+      command: `${command} | dd bs=3000 skip=${offset / 3000} count=1 iflag=fullblock status=none`,
       output: bytes.subarray(offset, offset + 3000).toString("utf8"),
     });
   }
@@ -36,6 +40,92 @@ export function completePatchEvidence(
       ),
     )
   );
+}
+
+// Explains a failed complete-patch check with counts and booleans only: which
+// mandatory chunks had no tool event, a failed one, or output that differed (and how).
+// Never retains commands, output, or model text.
+export function patchPageDiagnostics(
+  transcript: string,
+  pages: readonly CommandEvidence[],
+): PatchPageDiagnostics {
+  const events = transcript.split("\n").flatMap((line) => {
+    try {
+      const event = JSON.parse(line);
+      const item = event.item;
+      return event.type === "item.completed" &&
+        item?.type === "command_execution" &&
+        typeof item.command === "string"
+        ? [
+            {
+              command: item.command as string,
+              output: typeof item.aggregated_output === "string" ? item.aggregated_output : null,
+              succeeded: item.status === "completed" && item.exit_code === 0,
+            },
+          ]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const result: PatchPageDiagnostics = {
+    pages: pages.length,
+    matched: 0,
+    notRun: 0,
+    failed: 0,
+    outputMismatch: 0,
+    mismatchEqualAfterTrim: 0,
+    mismatchTruncated: 0,
+    mismatchWithExtraOutput: 0,
+    mismatchOther: 0,
+    firstUnmatchedPage: null,
+    lastMatchedPage: null,
+    chunkReadsNotInContract: 0,
+  };
+  const used = new Set<number>();
+  pages.forEach((page, index) => {
+    const runs = events.flatMap((entry, position) =>
+      matchesExecutedCommand(entry.command, page.command) ? [{ ...entry, position }] : [],
+    );
+    for (const run of runs) used.add(run.position);
+    if (runs.some((run) => run.succeeded && run.output === page.output)) {
+      result.matched += 1;
+      result.lastMatchedPage = index;
+      return;
+    }
+    result.firstUnmatchedPage ??= index;
+    const successful = runs.filter((run) => run.succeeded && run.output !== null);
+    if (runs.length === 0) result.notRun += 1;
+    else if (successful.length === 0) result.failed += 1;
+    else {
+      result.outputMismatch += 1;
+      const output = successful.at(-1)?.output ?? "";
+      if (output.trim() === page.output.trim()) result.mismatchEqualAfterTrim += 1;
+      else if (output.length < page.output.length && page.output.startsWith(output.trimEnd()))
+        result.mismatchTruncated += 1;
+      else if (output.includes(page.output)) result.mismatchWithExtraOutput += 1;
+      else result.mismatchOther += 1;
+    }
+  });
+  result.chunkReadsNotInContract = events.filter(
+    (entry, position) => !used.has(position) && /\bdd\b[^|]*\bskip=/.test(entry.command),
+  ).length;
+  return result;
+}
+
+export interface PatchPageDiagnostics {
+  pages: number;
+  matched: number;
+  notRun: number;
+  failed: number;
+  outputMismatch: number;
+  mismatchEqualAfterTrim: number;
+  mismatchTruncated: number;
+  mismatchWithExtraOutput: number;
+  mismatchOther: number;
+  firstUnmatchedPage: number | null;
+  lastMatchedPage: number | null;
+  chunkReadsNotInContract: number;
 }
 
 export function checkoutInspectionContract(

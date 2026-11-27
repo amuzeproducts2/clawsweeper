@@ -4143,7 +4143,12 @@ function main() {
     780,
   );
   const model = args.codex_model || "gpt-5.5";
-  const codexTimeoutMs = positiveInteger(args.codex_timeout_ms, "codex_timeout_ms", 600_000);
+  // Still capped by the remaining run budget (max_runtime_seconds) at dispatch.
+  const codexTimeoutMs = positiveInteger(
+    args.codex_timeout_ms ?? process.env.CLAWSWEEPER_CODEX_TIMEOUT_MS,
+    "codex_timeout_ms",
+    600_000,
+  );
   const startedAtMs = Date.now();
   const deadlineMs = startedAtMs + maxRuntimeSeconds * 1000;
   activeRunDeadlineMs = deadlineMs;
@@ -4307,7 +4312,9 @@ function main() {
     currentRunState = checkpointRunState(currentRunState, {
       now,
       attemptedRepos: [repo],
-      attemptCursorRepo: repo === fairnessRepo ? repo : undefined,
+      // Advance through every routine attempt, not just the first fairness slot.
+      // Priority-only visits must not steal the independent routine cursor.
+      attemptCursorRepo: selectedPriorityRepos.includes(repo) ? undefined : repo,
       securityAlerts: securityState,
     });
     atomicWriteJson(schedulerStatePath, currentRunState);
@@ -4434,7 +4441,7 @@ function main() {
       currentRunState = checkpointRunState(currentRunState, {
         now,
         visitedRepos: [repo],
-        advanceCursor: repo === fairnessRepo,
+        advanceCursor: !selectedPriorityRepos.includes(repo),
         securityAlerts: securityState,
       });
       atomicWriteJson(schedulerStatePath, currentRunState);

@@ -48,6 +48,7 @@ import { stableJson } from "./stable-json.js";
 import {
   checkoutExecutionDiagnostics,
   patchInspectionPages,
+  patchPageDiagnostics,
   completePatchEvidence,
   checkoutInspectionContract,
   verifiedCheckoutEvidence,
@@ -6845,6 +6846,7 @@ function runCodexInCheckout(options: {
       JSON.stringify(
         {
           ...checkoutExecutionDiagnostics(result.stdout ?? "", options.git.mainSha, headSha),
+          ...(headSha ? { patchPages: patchPageDiagnostics(result.stdout ?? "", patchPages) } : {}),
           attempt,
           processExitCode: result.status,
           processFailed: Boolean(result.error || result.signal),
