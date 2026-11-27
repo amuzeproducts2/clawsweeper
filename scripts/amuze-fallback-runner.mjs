@@ -4307,7 +4307,9 @@ function main() {
     currentRunState = checkpointRunState(currentRunState, {
       now,
       attemptedRepos: [repo],
-      attemptCursorRepo: repo === fairnessRepo ? repo : undefined,
+      // Advance through every routine attempt, not just the first fairness slot.
+      // Priority-only visits must not steal the independent routine cursor.
+      attemptCursorRepo: selectedPriorityRepos.includes(repo) ? undefined : repo,
       securityAlerts: securityState,
     });
     atomicWriteJson(schedulerStatePath, currentRunState);
@@ -4434,7 +4436,7 @@ function main() {
       currentRunState = checkpointRunState(currentRunState, {
         now,
         visitedRepos: [repo],
-        advanceCursor: repo === fairnessRepo,
+        advanceCursor: !selectedPriorityRepos.includes(repo),
         securityAlerts: securityState,
       });
       atomicWriteJson(schedulerStatePath, currentRunState);
