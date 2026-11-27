@@ -193,3 +193,62 @@ test("complete patch coverage requires every bounded chunk, without omissions or
   assert.equal(completePatchEvidence(event(small[0].command, "+fix\n"), small), true);
   assert.equal(completePatchEvidence(event(small[0].command, "+fi"), small), false);
 });
+
+test("patch page diagnostics count why chunks are unproven without retaining content", async () => {
+  const { patchInspectionPages, patchPageDiagnostics, completePatchEvidence } =
+    await import("../dist/codex-command-evidence.js");
+  const patch = "diff --git a/large.txt b/large.txt\n" + "+secret line 🦀\n".repeat(1500);
+  const pages = patchInspectionPages("base", "final", patch);
+  assert.ok(pages.length >= 8);
+  const complete = patchPageDiagnostics(
+    pages.map((page) => event(page.command, page.output)).join("\n"),
+    pages,
+  );
+  assert.deepEqual(
+    { ...complete, lastMatchedPage: null },
+    {
+      pages: pages.length,
+      matched: pages.length,
+      notRun: 0,
+      failed: 0,
+      outputMismatch: 0,
+      mismatchEqualAfterTrim: 0,
+      mismatchTruncated: 0,
+      mismatchWithExtraOutput: 0,
+      mismatchOther: 0,
+      firstUnmatchedPage: null,
+      lastMatchedPage: null,
+      chunkReadsNotInContract: 0,
+    },
+  );
+  assert.equal(complete.lastMatchedPage, pages.length - 1);
+  const transcript = [
+    event(pages[0].command, pages[0].output),
+    // page 1 never run
+    event(pages[2].command, pages[2].output, { exit_code: 1 }),
+    event(pages[3].command, `${pages[3].output.trim()}\n`),
+    event(pages[4].command, pages[4].output.slice(0, 100)),
+    event(pages[5].command, `warning: noise\n${pages[5].output}`),
+    event(pages[6].command, "something else entirely"),
+    ...pages.slice(7).map((page) => event(page.command, page.output)),
+    event(`${checkoutDiffCommand("base", "final")} | dd bs=1 skip=0 count=9000 status=none`, "x"),
+    "not json",
+  ].join("\n");
+  const partial = patchPageDiagnostics(transcript, pages);
+  assert.equal(completePatchEvidence(transcript, pages), false);
+  assert.deepEqual(partial, {
+    pages: pages.length,
+    matched: pages.length - 6,
+    notRun: 1,
+    failed: 1,
+    outputMismatch: 4,
+    mismatchEqualAfterTrim: 1,
+    mismatchTruncated: 1,
+    mismatchWithExtraOutput: 1,
+    mismatchOther: 1,
+    firstUnmatchedPage: 1,
+    lastMatchedPage: pages.length - 1,
+    chunkReadsNotInContract: 1,
+  });
+  assert.doesNotMatch(JSON.stringify(partial), /secret|dd bs|noise/);
+});
