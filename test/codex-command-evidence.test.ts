@@ -149,6 +149,17 @@ test("complete patch coverage requires every bounded chunk, without omissions or
   const patch = "diff --git a/large.txt b/large.txt\n" + "+line 🦀\n".repeat(1500);
   const pages = patchInspectionPages("base", "final", patch);
   assert.ok(pages.length > 3);
+  // One full-block read and one write per chunk: byte-at-a-time output is lost by Codex capture.
+  pages.forEach((page, index) =>
+    assert.equal(
+      page.command,
+      `${checkoutDiffCommand("base", "final")} | dd bs=3000 skip=${index} count=1 iflag=fullblock status=none`,
+    ),
+  );
+  assert.equal(
+    Buffer.byteLength(pages.map((page) => page.output).join("")) >= Buffer.byteLength(patch),
+    true,
+  );
   const transcript = pages.map((page) => event(page.command, page.output)).join("\n");
   assert.equal(completePatchEvidence(transcript, pages), true);
   for (const missing of [0, Math.floor(pages.length / 2), pages.length - 1]) {

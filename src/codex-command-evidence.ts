@@ -4,6 +4,10 @@ export function checkoutDiffCommand(baseSha: string, headSha: string): string {
 
 // Keep each mandatory read below the 6,000-token tool output ceiling, including
 // minified/Unicode patches. Compare every byte-derived chunk with trusted git output.
+// Each chunk is one full-block read and a single write. The earlier `dd bs=1` form
+// wrote 3,000 one-byte chunks, and Codex 0.156 output capture drops data under that
+// flood (about 8% of reads came back short or empty with exit 0), so a diff of more
+// than a few chunks could never produce complete evidence.
 export function patchInspectionPages(
   baseSha: string,
   headSha: string,
@@ -15,7 +19,7 @@ export function patchInspectionPages(
   const pages: CommandEvidence[] = [];
   for (let offset = 0; offset < bytes.length; offset += 3000) {
     pages.push({
-      command: `${command} | dd bs=1 skip=${offset} count=3000 status=none`,
+      command: `${command} | dd bs=3000 skip=${offset / 3000} count=1 iflag=fullblock status=none`,
       output: bytes.subarray(offset, offset + 3000).toString("utf8"),
     });
   }
