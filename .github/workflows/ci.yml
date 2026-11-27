@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -50,12 +51,40 @@ jobs:
             tsconfig.repair.json
           sparse-checkout-cone-mode: false
 
-      - uses: ./.github/actions/setup-pnpm
-
-      - name: Install Prometheus metric tooling
+      # A pull request that only touches documentation runs the documentation
+      # check and finishes; everything else runs the full gate. The job name is a
+      # required status check, so it must always report.
+      - name: Classify change
+        id: scope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y prometheus
+          set -euo pipefail
+          scope=code
+          if [ "${GITHUB_EVENT_NAME}" = "pull_request" ]; then
+            files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" \
+              --jq '.[] | .filename, (.previous_filename // empty)' || true)"
+            scope="$(printf '%s\n' "${files}" | scripts/ci-change-scope.sh)"
+          fi
+          echo "scope=${scope}" >> "${GITHUB_OUTPUT}"
+          echo "Change scope: ${scope}"
+
+      - uses: actions/setup-node@v6
+        if: steps.scope.outputs.scope == 'docs'
+        with:
+          node-version: "24"
+
+      - name: Run documentation check
+        if: steps.scope.outputs.scope == 'docs'
+        run: node scripts/check-active-surface.ts
+
+      - uses: ./.github/actions/setup-pnpm
+        if: steps.scope.outputs.scope == 'code'
+
+      - uses: ./.github/actions/setup-promtool
+        if: steps.scope.outputs.scope == 'code'
 
       - name: Run check
+        if: steps.scope.outputs.scope == 'code'
         run: pnpm run check
