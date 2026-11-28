@@ -1847,19 +1847,20 @@ function parseRequiredChecks(result) {
   return null;
 }
 
+// { checks, error }: error is a short diagnostic when the list could not be read.
 function requiredPullRequestChecks(repo, number, execute = runBestEffort) {
-  return parseRequiredChecks(
-    execute("gh", [
-      "pr",
-      "checks",
-      String(number),
-      "--repo",
-      repo,
-      "--required",
-      "--json",
-      "name,state,bucket,link,workflow",
-    ]),
-  );
+  const result = execute("gh", [
+    "pr",
+    "checks",
+    String(number),
+    "--repo",
+    repo,
+    "--required",
+    "--json",
+    "name,state,bucket,link,workflow",
+  ]);
+  const checks = parseRequiredChecks(result);
+  return { checks, error: checks === null ? commandFailureSummary(result) : null };
 }
 
 // Dependabot's own commits are created and signed by GitHub. REST is the only
@@ -1932,7 +1933,8 @@ function inspectPr(repo, number) {
     ["pr", "checks", String(number), "--repo", repo, "--json", "name,state,bucket,link,workflow"],
     [],
   );
-  const requiredChecks = requiredPullRequestChecks(repo, number);
+  const required = requiredPullRequestChecks(repo, number);
+  const requiredChecks = required.checks;
   const checks = validationChecks(observedChecks, requiredChecks);
   const reviewComments = paginatedRestItems(
     runJson("gh", [
@@ -1959,6 +1961,7 @@ function inspectPr(repo, number) {
     checks,
     requiredChecks,
     requiredChecksUnavailable: requiredChecks === null,
+    requiredChecksError: required.error,
     renamedFrom: pullRequestRenamedPaths(repo, number),
     notificationChecks: observedChecks.filter((check) => !checks.includes(check)),
     reviewComments,
@@ -2067,9 +2070,10 @@ function allRequiredSignalsGreen(checks, requiredChecks = null) {
 
 // When the required-check list could not be read, a lane waits instead of guessing.
 function requiredChecksBlocker(inspection) {
-  return inspection?.requiredChecksUnavailable === true
-    ? "required checks could not be read"
-    : null;
+  if (inspection?.requiredChecksUnavailable !== true) return null;
+  return inspection.requiredChecksError
+    ? `required checks could not be read (${inspection.requiredChecksError})`
+    : "required checks could not be read";
 }
 
 function isMacroscopeBotLogin(login) {
@@ -2164,9 +2168,13 @@ function dependabotUpdateClass(pr) {
   }
   if (declared.length && kinds.every(Boolean)) {
     const kind = kinds.includes("minor") ? "minor" : "patch";
-    const zeroMajor = declared.some(
-      (entry, index) => kinds[index] === "minor" && versionParts(entry.version)?.[0] === 0,
-    );
+    // A minor update to 0.x may break compatibility. An unknown target version counts
+    // as 0.x, and the title's evidence is kept alongside the metadata.
+    const zeroMajor =
+      declared.some(
+        (entry, index) => kinds[index] === "minor" && (versionParts(entry.version)?.[0] ?? 0) === 0,
+      ) ||
+      (kind === "minor" && title?.zeroMajor === true);
     if (title && SEMVER_RANK[title.kind] > SEMVER_RANK[kind]) {
       return { kind: "unknown", declared: false, zeroMajor };
     }
@@ -2764,6 +2772,10 @@ function reviewFreeLaneFingerprint(inspection) {
     .update(
       JSON.stringify({
         signals: mergeSignalFingerprint(inspection),
+        title: inspection.pr?.title ?? null,
+        updateClass: isDependabotPullRequest(inspection.pr)
+          ? dependabotUpdateClass(inspection.pr)
+          : null,
         mergeStateStatus: inspection.pr?.mergeStateStatus ?? null,
         requiredChecks: (inspection.requiredChecks ?? [])
           .map((check) => [check?.name, check?.bucket, check?.state])
@@ -3867,18 +3879,39 @@ function failedCheckLogExcerpt(text, maxLines = 80, maxChars = 6000) {
   return tail.length > maxChars ? tail.slice(-maxChars) : tail;
 }
 
+// A short, redacted description of why a gh command failed, for receipts and prompts.
+function commandFailureSummary(result) {
+  const cause =
+    result?.error?.code ??
+    result?.error?.message ??
+    (result?.status === 0 ? "no output" : `exit ${result?.status}`);
+  const detail = String(result?.stderr ?? "")
+    .split("\n")
+    .find((line) => line.trim());
+  return failedCheckLogExcerpt(`${cause}${detail ? `: ${detail.trim()}` : ""}`, 1, 200);
+}
+
 // The runner, not the worker, reads failed job logs: the worker has no gh and no
-// network. At most two failed checks, each capped and redacted.
+// network. At most two fetch attempts per repair, each capped and redacted; a fetch
+// that fails is reported as such instead of looking like an absent log.
 function failedCheckLogs(repo, checks, execute = runBestEffort) {
   const logs = [];
+  let attempts = 0;
   for (const check of checks.filter((entry) => entry.bucket === "fail")) {
-    if (logs.length >= 2) break;
+    if (attempts >= 2) break;
     const jobId = actionsJobIdFromLink(check.link, repo);
     if (!jobId) continue;
+    attempts += 1;
     const result = execute("gh", ["run", "view", "--repo", repo, "--job", jobId, "--log-failed"], {
       timeoutMs: 30_000,
     });
-    if (result?.error || result?.status !== 0 || !result?.stdout) continue;
+    if (result?.error || result?.status !== 0 || !result?.stdout) {
+      logs.push({
+        name: check.name,
+        excerpt: `[the runner could not read this log: ${commandFailureSummary(result)}]`,
+      });
+      continue;
+    }
     logs.push({ name: check.name, excerpt: failedCheckLogExcerpt(result.stdout) });
   }
   return logs;
@@ -5427,6 +5460,8 @@ export {
   dependabotUpdateStop,
   passEvidenceGap,
   reviewFreeLaneFingerprint,
+  requiredChecksBlocker,
+  requiredPullRequestChecks,
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

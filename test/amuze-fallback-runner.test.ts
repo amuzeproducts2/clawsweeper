@@ -83,6 +83,8 @@ import {
   dependabotUpdateStop,
   passEvidenceGap,
   reviewFreeLaneFingerprint,
+  requiredChecksBlocker,
+  requiredPullRequestChecks,
   dependabotUpdateClass,
   dependencyPathReason,
   effectiveRepairState,
@@ -5075,4 +5077,103 @@ test("an explicit Macroscope refusal binds even where the fallback would apply",
   const excerpt = exactHeadReviewExcerpt(pr, [comment]);
   assert.match(excerpt, /Fix it\./);
   assert.doesNotMatch(excerpt, /<!--|-->/);
+});
+
+test("second-round review fixes: 0.x evidence, log-fetch budget, diagnostics, title in the cache key", () => {
+  // A declared minor update keeps the title's 0.x evidence, and an unknown target is 0.x.
+  const noVersion = (title) =>
+    dependabotUpdateClass(
+      dependabotPr({
+        title,
+        commits: [
+          {
+            ...dependabotCommit({ kind: "minor" }),
+            messageBody: dependabotCommit({ kind: "minor" }).messageBody.replace(
+              /^  dependency-version: .*\n/m,
+              "",
+            ),
+          },
+        ],
+      }),
+    );
+  assert.equal(noVersion("chore(deps): bump example from 0.4.15 to 0.5.0").zeroMajor, true);
+  assert.equal(noVersion("chore(deps): bump the npm group with 2 updates").zeroMajor, true);
+  assert.equal(
+    dependabotUpdateClass(
+      dependabotPr({
+        title: "chore(deps): bump example from 2.0.0 to 2.1.0",
+        commits: [dependabotCommit({ kind: "minor", version: "2.1.0" })],
+      }),
+    ).zeroMajor,
+    false,
+  );
+  assert.equal(
+    autoMergeDependabotBlocker(
+      dependabotPr({
+        title: "chore(deps): bump example from 0.4.15 to 0.5.0",
+        commits: [dependabotCommit({ kind: "minor", version: "" })],
+      }),
+      macroscopeChecks(),
+      { files: 1, additions: 1, deletions: 1 },
+      macroscopeApproval(),
+      [],
+      [],
+      { pullCommits: [signedDependabotCommit()] },
+    ),
+    "0.x minor update needs agent review",
+  );
+  // Log fetches stop after two attempts, and a failed fetch says so.
+  const repo = "amuzeproducts2/example";
+  const calls = [];
+  const logs = failedCheckLogs(
+    repo,
+    [1, 2, 3, 4, 5].map((index) => ({
+      name: `job ${index}`,
+      bucket: "fail",
+      link: `https://github.com/${repo}/actions/runs/${index}/job/${index}0`,
+    })),
+    (command, args) => {
+      calls.push(args.join(" "));
+      return { status: 1, stdout: "", stderr: "HTTP 403: Resource not accessible by integration" };
+    },
+  );
+  assert.equal(calls.length, 2);
+  assert.deepEqual(
+    logs.map((log) => log.excerpt),
+    [
+      "[the runner could not read this log: exit 1: HTTP 403: Resource not accessible by integration]",
+      "[the runner could not read this log: exit 1: HTTP 403: Resource not accessible by integration]",
+    ],
+  );
+  // A failed required-check lookup keeps a short diagnostic for the waiting reason.
+  const failed = requiredPullRequestChecks(repo, 7, () => ({
+    status: 1,
+    stdout: "",
+    error: { code: "EPERM" },
+    stderr: "",
+  }));
+  assert.deepEqual(failed, { checks: null, error: "EPERM" });
+  assert.equal(
+    requiredChecksBlocker({ requiredChecksUnavailable: true, requiredChecksError: failed.error }),
+    "required checks could not be read (EPERM)",
+  );
+  assert.deepEqual(
+    requiredPullRequestChecks(repo, 7, () => ({ status: 0, stdout: "[]" })),
+    { checks: [], error: null },
+  );
+  // A title change re-evaluates a cached review-free blocker.
+  const inspection = {
+    pr: dependabotPr(),
+    checks: macroscopeChecks(),
+    reviews: macroscopeApproval(),
+    conversationComments: [],
+    reviewThreads: [],
+  };
+  assert.notEqual(
+    reviewFreeLaneFingerprint(inspection),
+    reviewFreeLaneFingerprint({
+      ...inspection,
+      pr: { ...inspection.pr, title: "chore(deps): bump example from 2.0.0 to 3.0.0" },
+    }),
+  );
 });
