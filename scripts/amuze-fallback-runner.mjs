@@ -1533,14 +1533,50 @@ function reviewFailureReason(error, report = "") {
   return message.length > 1000 ? message.slice(-1000) : message;
 }
 
-function reviewStateIsCurrent(state, inspection) {
+// What a pass verdict still lacks before this PR may merge through an agent lane.
+// Readiness and review quiescence share it, so a PR that needs a stronger review gets
+// one instead of waiting for it forever.
+function passEvidenceGap(verdict, inspection, repo = null) {
+  const files = inspection?.pr?.files ?? [];
+  if (files.some((file) => isWorkflowPath(file.path)) && !verdict?.securityCleared) {
+    return "workflow changes require exact-head security clearance";
+  }
+  // Dependency manifests and lockfiles are no longer human-only, but they need the
+  // same complete, security-cleared exact-head review as workflow changes.
+  if (
+    files.some((file) => dependencyPathReason(file.path)) &&
+    !(verdict?.securityCleared && verdict?.patchComplete)
+  ) {
+    return "dependency changes require complete exact-head security clearance";
+  }
+  if (requiresCompletePatch(inspection) && !verdict?.patchComplete) {
+    return "complete exact-head patch coverage required";
+  }
+  if (
+    repo &&
+    macroscopeApprovabilityDisabled(repo) &&
+    !macroscopeApprovabilityChecks(inspection?.checks ?? []).length &&
+    !(verdict?.securityCleared && verdict?.patchComplete)
+  ) {
+    return "without Macroscope approval, a complete security-cleared review is required";
+  }
+  return null;
+}
+
+// A pass that still lacks evidence re-arms a review, at most this many times per head;
+// after that the PR waits with the reason visible instead of reviewing every cycle.
+const MAX_EVIDENCE_UPGRADE_REVIEWS = 2;
+
+function reviewStateIsCurrent(state, inspection, repo = null) {
   const verdict = latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments);
   if (
     verdict?.verdict === "pass" &&
     !verdict.escalation &&
-    ((requiresCompletePatch(inspection) && !verdict.patchComplete) ||
-      ((inspection.pr.files ?? []).some((file) => isWorkflowPath(file.path)) &&
-        !verdict.securityCleared))
+    passEvidenceGap(verdict, inspection, repo) &&
+    !(
+      state?.headSha === inspection?.pr?.headRefOid &&
+      Number(state?.evidenceUpgrades ?? 0) >= MAX_EVIDENCE_UPGRADE_REVIEWS
+    )
   )
     return false;
   return Boolean(
@@ -1552,15 +1588,21 @@ function reviewStateIsCurrent(state, inspection) {
 }
 
 function captureReviewState(repo, number, inspection, verdictOverride = null) {
-  const verdict =
-    verdictOverride ||
-    latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments)?.verdict;
+  const latest = latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments);
+  const verdict = verdictOverride || latest?.verdict;
   if (!verdict) return null;
+  const previous = readReviewState(repo, number);
   const state = {
     status: "complete",
     headSha: inspection.pr.headRefOid,
     evidenceFingerprint: mergeSignalFingerprint(inspection),
     verdict,
+    evidenceUpgrades:
+      verdict === "pass" && passEvidenceGap(latest, inspection, repo)
+        ? (previous?.headSha === inspection.pr.headRefOid
+            ? Number(previous.evidenceUpgrades ?? 0)
+            : 0) + 1
+        : 0,
   };
   writeReviewState(repo, number, state);
   return state;
@@ -1831,6 +1873,29 @@ function pullRequestCommits(repo, number, execute = runJsonBestEffort) {
   return Array.isArray(pages) && pages.every(Array.isArray) ? pages.flat() : null;
 }
 
+// Old paths of renamed files. `gh pr view --json files` lists only the new path, so
+// moving a file out of a protected directory would otherwise hide it. null: unknown.
+function pullRequestRenamedPaths(repo, number, execute = runJsonBestEffort) {
+  const pages = execute(
+    "gh",
+    ["api", "--paginate", "--slurp", `repos/${repo}/pulls/${number}/files?per_page=100`],
+    null,
+  );
+  if (!Array.isArray(pages) || !pages.every(Array.isArray)) return null;
+  return pages
+    .flat()
+    .map((file) => file?.previous_filename)
+    .filter((path) => typeof path === "string" && path);
+}
+
+// Every path a PR touches, including the old side of renames.
+function touchedPaths(inspection) {
+  return [
+    ...(inspection?.pr?.files ?? []).map((file) => file.path),
+    ...(inspection?.renamedFrom ?? []),
+  ];
+}
+
 // Titles of Macroscope's check runs on the head, read only when its Correctness
 // check was skipped: the title is the only place that says why.
 function macroscopeCheckTitles(repo, headSha, checks, execute = runJsonBestEffort) {
@@ -1893,6 +1958,8 @@ function inspectPr(repo, number) {
     pr,
     checks,
     requiredChecks,
+    requiredChecksUnavailable: requiredChecks === null,
+    renamedFrom: pullRequestRenamedPaths(repo, number),
     notificationChecks: observedChecks.filter((check) => !checks.includes(check)),
     reviewComments,
     reviews,
@@ -1976,17 +2043,33 @@ function checkPassed(check) {
   return check?.bucket === "pass" && !/SKIPPED|NEUTRAL/i.test(check?.state ?? "");
 }
 
-// Repository CI only; Macroscope's review checks are judged by macroscopeApprovalBlocker.
-// Every remaining check must pass. The CI signal is any check branch protection
-// requires, whatever its name; without required checks, a CI/test/check/build-named
-// check must exist, because review-only signals cannot stand in for tests.
+// Macroscope's Correctness and Approvability checks, judged by macroscopeApprovalBlocker.
+// Any other Macroscope check is an ordinary check here.
+function isMacroscopeReviewCheck(check) {
+  return isMacroscopeCheck(check) && /correctness|approv/i.test(check?.name ?? "");
+}
+
+// Every check except Macroscope's two review checks must pass, required ones
+// included. The CI signal is a required check that is neither a relay nor a Macroscope
+// check, whatever its name; without one, a CI/test/check/build-named check must exist,
+// because review-only and relay signals cannot stand in for tests.
 function allRequiredSignalsGreen(checks, requiredChecks = null) {
-  const validation = checks.filter((check) => !isMacroscopeCheck(check));
-  const required = (requiredChecks ?? []).filter((check) => !isMacroscopeCheck(check));
-  const hasCiSignal = required.length
-    ? required.every(checkPassed)
-    : validation.some((check) => /\b(CI|tests?|checks?|build)\b/i.test(check.name ?? ""));
-  return hasCiSignal && validation.every(checkPassed);
+  const validation = checks.filter((check) => !isMacroscopeReviewCheck(check));
+  const required = (requiredChecks ?? []).filter((check) => !isMacroscopeReviewCheck(check));
+  const isCiCheck = (check) => !isActivityRelayCheck(check) && !isMacroscopeCheck(check);
+  const hasCiSignal =
+    required.some(isCiCheck) ||
+    validation.some(
+      (check) => isCiCheck(check) && /\b(CI|tests?|checks?|build)\b/i.test(check.name ?? ""),
+    );
+  return hasCiSignal && required.every(checkPassed) && validation.every(checkPassed);
+}
+
+// When the required-check list could not be read, a lane waits instead of guessing.
+function requiredChecksBlocker(inspection) {
+  return inspection?.requiredChecksUnavailable === true
+    ? "required checks could not be read"
+    : null;
 }
 
 function isMacroscopeBotLogin(login) {
@@ -2021,6 +2104,7 @@ function macroscopeReviewedNoCode(check, checkTitles = {}) {
 
 const SEMVER_RANK = { patch: 1, minor: 2, major: 3 };
 const DEPENDABOT_MAJOR_REASON = "dependency update is a major version";
+const DEPENDABOT_UNKNOWN_REASON = "dependency update size could not be determined";
 
 function versionParts(value) {
   const match = String(value ?? "")
@@ -2098,15 +2182,28 @@ function dependabotUpdateClass(pr) {
   return { kind: "unknown", declared: false, zeroMajor: false };
 }
 
-function isDependabotMajorUpdate(pr) {
-  return isDependabotPullRequest(pr) && dependabotUpdateClass(pr).kind === "major";
+// Dependabot updates that stop for a person in every lane: a major update, or one whose
+// size neither Dependabot's metadata nor its title shows (it could be a major).
+function dependabotUpdateStop(pr) {
+  if (!isDependabotPullRequest(pr)) return null;
+  const { kind } = dependabotUpdateClass(pr);
+  if (kind === "major") return DEPENDABOT_MAJOR_REASON;
+  if (kind === "unknown") return DEPENDABOT_UNKNOWN_REASON;
+  return null;
 }
 
 // The PR author cannot be forged, but commit author metadata can. Every commit must
-// be Dependabot's own: authored by the Dependabot bot, committed and signed by GitHub.
+// be Dependabot's own: authored by the Dependabot bot, committed and signed by GitHub,
+// and exactly the commits of the inspected head.
 function githubVerifiedDependabotCommits(pr, pullCommits) {
   if (!Array.isArray(pullCommits) || !pullCommits.length) return false;
-  if (pullCommits.length !== (pr?.commits ?? []).length) return false;
+  const inspected = (pr?.commits ?? []).map((commit) => commit?.oid);
+  if (
+    pullCommits.length !== inspected.length ||
+    pullCommits.some((commit, index) => !commit?.sha || commit.sha !== inspected[index])
+  ) {
+    return false;
+  }
   return pullCommits.every(
     (commit) =>
       String(commit?.author?.login ?? "").toLowerCase() === "dependabot[bot]" &&
@@ -2254,7 +2351,8 @@ const AGENT_REVIEW_ROUTED_BLOCKER =
 function mergeProgressionFlags(blocker, checks = [], reviewThreads = []) {
   const needsRepair =
     actionableReviewThreads(reviewThreads).length > 0 ||
-    checks.some((check) => check.bucket === "fail" || check.bucket === "cancel");
+    checks.some((check) => check.bucket === "fail" || check.bucket === "cancel") ||
+    /^exact-head review verdict is needs-(changes|repair)$/.test(String(blocker));
   return {
     needsRepair,
     // Macroscope declining to approve is a stop; another review cannot override it.
@@ -2388,7 +2486,7 @@ function macroscopeApprovalBlocker(
   reviews,
   conversationComments = [],
   reviewThreads = [],
-  { checkTitles = {}, agentVerdict = null } = {},
+  { checkTitles = {}, agentVerdict = null, approvabilityDisabled = false } = {},
 ) {
   const actionableThreads = actionableReviewThreads(reviewThreads);
   if (actionableThreads.length) {
@@ -2425,11 +2523,18 @@ function macroscopeApprovalBlocker(
   void conversationComments;
   const latestReview = latestExactHeadMacroscopeReview(pr, reviews);
   if (latestReview?.state === "APPROVED") return reviewDecisionBlocker(pr);
-  // Approvability is a per-repository Macroscope setting. Correctness has finished on
-  // this head, so Macroscope has processed it; no Approvability check means the feature
-  // is off here. Only the agent lanes pass their own verdict, and only a complete,
-  // security-cleared exact-head pass with no escalation stands in for the approval.
+  // An explicit refusal binds even where nothing else would (no Approvability check,
+  // no review requirement on the branch).
+  if (latestReview?.state === "CHANGES_REQUESTED") {
+    return "latest exact-head Macroscope review is CHANGES_REQUESTED";
+  }
+  // Approvability is a per-repository Macroscope setting. A missing check proves nothing
+  // (it may simply not have started), so the fallback applies only to repositories
+  // explicitly listed as having it switched off (CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS),
+  // only after Correctness finished on this head, and only for the agent lanes' own
+  // complete, security-cleared exact-head pass with no escalation.
   if (
+    approvabilityDisabled === true &&
     !approvabilityChecks.length &&
     agentVerdict?.verdict === "pass" &&
     agentVerdict.patchComplete === true &&
@@ -2440,6 +2545,13 @@ function macroscopeApprovalBlocker(
   }
   if (!latestReview) return "missing exact-head Macroscope approval";
   return `latest exact-head Macroscope review is ${latestReview.state}`;
+}
+
+function macroscopeApprovabilityDisabled(repo) {
+  return String(process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS ?? "")
+    .split(/[\s,]+/)
+    .filter(Boolean)
+    .some((entry) => entry.toLowerCase() === String(repo ?? "").toLowerCase());
 }
 
 // An approval does not satisfy GitHub when a branch rule still requires a review
@@ -2455,9 +2567,40 @@ function reviewDecisionBlocker(pr) {
 const RISK_LABEL_PATTERN =
   /security|secret|major|breaking|migration|schema|human-review|do.not.merge|blocked|^merge-risk:/i;
 
+// Gates shared by both review-free lanes. A ClawSweeper review of this exact head that
+// did not pass, or that escalated, always wins over Macroscope's approval: changes go
+// to repair, escalations stop. Hard-stop paths (including the old side of a rename)
+// stop, and evidence that could not be read means waiting.
+function reviewFreeLaneBlocker(pr, conversationComments, options) {
+  const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
+  if (verdict?.escalation) return `agent review requires ${verdict.escalation}`;
+  if (verdict && verdict.verdict !== "pass")
+    return `exact-head review verdict is ${verdict.verdict}`;
+  if (options.renamedFrom === null) return "renamed paths could not be read";
+  const hardStop = [
+    ...(pr.files ?? []).map((file) => file.path),
+    ...(options.renamedFrom ?? []),
+  ].find((path) => hardStopPathReason(path));
+  if (hardStop) return `sensitive path changed: ${hardStop}`;
+  if (options.requiredChecksUnavailable) return "required checks could not be read";
+  return null;
+}
+
+function reviewFreeLaneOptions(options) {
+  const value = options && typeof options === "object" ? options : {};
+  return {
+    requiredChecks: value.requiredChecks ?? null,
+    requiredChecksUnavailable: value.requiredChecksUnavailable === true,
+    pullCommits: value.pullCommits ?? null,
+    checkTitles: value.checkTitles ?? {},
+    // undefined: not supplied (older callers); null: the lookup failed.
+    renamedFrom: value.renamedFrom === undefined ? [] : value.renamedFrom,
+  };
+}
+
 // The review-free Dependabot lane. Anything it cannot prove is a patch or minor
 // lockfile update made only by Dependabot goes to the independent agent review
-// instead (see mergeProgressionFlags); major updates and pause labels stop.
+// instead (see mergeProgressionFlags); major or unsized updates and pause labels stop.
 function autoMergeDependabotBlocker(
   pr,
   checks,
@@ -2467,11 +2610,8 @@ function autoMergeDependabotBlocker(
   reviewThreads,
   options = {},
 ) {
-  const {
-    requiredChecks = null,
-    pullCommits = null,
-    checkTitles = {},
-  } = options && typeof options === "object" ? options : {};
+  const laneOptions = reviewFreeLaneOptions(options);
+  const { requiredChecks, pullCommits, checkTitles } = laneOptions;
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   const files = pr.files ?? [];
   if (!isDependabotPullRequest(pr)) return "not a trusted Dependabot PR";
@@ -2480,8 +2620,11 @@ function autoMergeDependabotBlocker(
   if (!pr.headRefOid) return "missing head SHA";
   if (pr.reviewDecision === "CHANGES_REQUESTED") return "requested changes are open";
   if (labels.some((label) => RISK_LABEL_PATTERN.test(label))) return "risk/pause label present";
+  const updateStop = dependabotUpdateStop(pr);
+  if (updateStop) return updateStop;
   const update = dependabotUpdateClass(pr);
-  if (update.kind === "major") return DEPENDABOT_MAJOR_REASON;
+  const shared = reviewFreeLaneBlocker(pr, conversationComments, laneOptions);
+  if (shared) return shared;
   if (!allRequiredSignalsGreen(checks, requiredChecks)) return "checks are not all green";
   const actionableThreads = actionableReviewThreads(reviewThreads);
   if (actionableThreads.length) {
@@ -2533,8 +2676,10 @@ function autoMergeMacroscopeLowRiskBlocker(
   reviews,
   conversationComments,
   reviewThreads,
-  { requiredChecks = null, checkTitles = {} } = {},
+  options = {},
 ) {
+  const laneOptions = reviewFreeLaneOptions(options);
+  const { requiredChecks, checkTitles } = laneOptions;
   const labels = (pr.labels ?? []).map((label) => label.name).filter(Boolean);
   const files = pr.files ?? [];
   if (pr.isDraft) return "draft PR";
@@ -2543,7 +2688,10 @@ function autoMergeMacroscopeLowRiskBlocker(
   if (pr.reviewDecision === "CHANGES_REQUESTED") return "requested changes are open";
   if (pr.isCrossRepository) return "cross-repository PR";
   if (labels.some((label) => RISK_LABEL_PATTERN.test(label))) return "risk/pause label present";
-  if (isDependabotMajorUpdate(pr)) return DEPENDABOT_MAJOR_REASON;
+  const updateStop = dependabotUpdateStop(pr);
+  if (updateStop) return updateStop;
+  const shared = reviewFreeLaneBlocker(pr, conversationComments, laneOptions);
+  if (shared) return shared;
   if (!allRequiredSignalsGreen(checks, requiredChecks)) return "checks are not all green";
 
   const macroscopeBlocker = macroscopeApprovalBlocker(
@@ -2581,12 +2729,18 @@ function autoMergeDependabotBlockerFromInspection(inspection) {
     reviews,
     conversationComments,
     reviewThreads,
-    {
-      requiredChecks: inspection.requiredChecks ?? null,
-      pullCommits: inspection.pullCommits ?? null,
-      checkTitles: inspection.macroscopeCheckTitles ?? {},
-    },
+    inspectionLaneOptions(inspection),
   );
+}
+
+function inspectionLaneOptions(inspection) {
+  return {
+    requiredChecks: inspection.requiredChecks ?? null,
+    requiredChecksUnavailable: inspection.requiredChecksUnavailable === true,
+    pullCommits: inspection.pullCommits ?? null,
+    checkTitles: inspection.macroscopeCheckTitles ?? {},
+    renamedFrom: inspection.renamedFrom,
+  };
 }
 
 function autoMergeMacroscopeLowRiskBlockerFromInspection(inspection) {
@@ -2598,11 +2752,30 @@ function autoMergeMacroscopeLowRiskBlockerFromInspection(inspection) {
     reviews,
     conversationComments,
     reviewThreads,
-    {
-      requiredChecks: inspection.requiredChecks ?? null,
-      checkTitles: inspection.macroscopeCheckTitles ?? {},
-    },
+    inspectionLaneOptions(inspection),
   );
+}
+
+// The review-free lanes cache a blocker until these inputs change. Beyond the review
+// fingerprint, they also read GitHub's merge state and evidence fetched separately.
+// (A separate hash keeps mergeSignalFingerprint, and with it review quiescence, as is.)
+function reviewFreeLaneFingerprint(inspection) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        signals: mergeSignalFingerprint(inspection),
+        mergeStateStatus: inspection.pr?.mergeStateStatus ?? null,
+        requiredChecks: (inspection.requiredChecks ?? [])
+          .map((check) => [check?.name, check?.bucket, check?.state])
+          .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+        requiredChecksUnavailable: inspection.requiredChecksUnavailable === true,
+        renamedFrom:
+          inspection.renamedFrom === null ? null : [...(inspection.renamedFrom ?? [])].sort(),
+        checkTitles: Object.entries(inspection.macroscopeCheckTitles ?? {}).sort(),
+        verifiedCommits: githubVerifiedDependabotCommits(inspection.pr, inspection.pullCommits),
+      }),
+    )
+    .digest("hex");
 }
 
 function isLowRiskMacroscopeCandidate(pr) {
@@ -2627,7 +2800,7 @@ function autoMergeDependabotPr({ repo, number, inspection }) {
   // v2: the 2026-11-28 rules. A new strategy name re-evaluates PRs blocked under the
   // old rules instead of replaying their stored, now stale, blocker.
   const strategy = "dependabot-squash-v2";
-  const fingerprint = mergeSignalFingerprint(inspection);
+  const fingerprint = reviewFreeLaneFingerprint(inspection);
   const unchanged = activeUnchangedMergeState(
     state,
     pr.headRefOid,
@@ -2731,7 +2904,7 @@ function autoMergeMacroscopeLowRiskPr({ repo, number, inspection }) {
   const state = readMergeState(repo, number);
   // v2: re-evaluate PRs blocked under the pre-2026-11-28 rules (see autoMergeDependabotPr).
   const strategy = "macroscope-low-risk-squash-v2";
-  const fingerprint = mergeSignalFingerprint(inspection);
+  const fingerprint = reviewFreeLaneFingerprint(inspection);
   const unchanged = activeUnchangedMergeState(
     state,
     pr.headRefOid,
@@ -2848,11 +3021,20 @@ function reviewedStateTracksHead(state, headSha) {
 // major update) are re-evaluated every cycle, so fixing the cause or changing a rule
 // releases them. Escalations by a reviewer or repair worker, thread-resolution
 // permission failures and unknown reasons stay sticky until the head changes.
+// The exact readiness reasons that only restate the PR's shape. Matched whole, so free
+// text (a repair worker's summary) can never pass for one.
 const DERIVED_PAUSE_REASON =
-  /^(draft PR|cross-repository PR|risk\/pause label present|sensitive path changed: |dependency update is a major version)/;
+  /^(draft PR|cross-repository PR|risk\/pause label present|dependency update is a major version|dependency update size could not be determined|sensitive path changed: \S+)$/;
+
+// New pauses record their kind; records written before 2026-11-28 have none and are
+// judged by their reason.
+function isDerivedPause(state) {
+  if (state?.pauseKind) return state.pauseKind === "derived";
+  return DERIVED_PAUSE_REASON.test(String(state?.reason ?? ""));
+}
 
 function effectiveRepairState(state, headSha) {
-  if (state?.status !== "paused" || !DERIVED_PAUSE_REASON.test(String(state.reason ?? ""))) {
+  if (state?.status !== "paused" || !isDerivedPause(state)) {
     return state ?? {};
   }
   if ((state.pausedSha ?? state.headSha) !== headSha) return state;
@@ -3090,32 +3272,21 @@ function agentRepairReadiness(
   if (labels.some((label) => RISK_LABEL_PATTERN.test(label))) {
     return { status: "human", reason: "risk/pause label present" };
   }
-  if (isDependabotMajorUpdate(pr)) return { status: "human", reason: DEPENDABOT_MAJOR_REASON };
+  const updateStop = dependabotUpdateStop(pr);
+  if (updateStop) return { status: "human", reason: updateStop };
   // Repair worker bounds are not merge bounds: this lane requires an independent
   // full-patch exact-head review and green checks, even for large PRs.
   const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
   if (verdict?.escalation) {
     return { status: "human", reason: `agent review requires ${verdict.escalation}` };
   }
-  const hardStop = (pr.files ?? []).find((file) => hardStopPathReason(file.path));
-  if (hardStop) return { status: "human", reason: `sensitive path changed: ${hardStop.path}` };
-  if ((pr.files ?? []).some((file) => isWorkflowPath(file.path)) && !verdict?.securityCleared) {
-    return { status: "review", reason: "workflow changes require exact-head security clearance" };
+  const hardStop = touchedPaths(inspection).find((path) => hardStopPathReason(path));
+  if (hardStop) return { status: "human", reason: `sensitive path changed: ${hardStop}` };
+  if (inspection.renamedFrom === null) {
+    return { status: "waiting", reason: "renamed paths could not be read" };
   }
-  // Dependency manifests and lockfiles are no longer human-only, but they need the
-  // same complete, security-cleared exact-head review as workflow changes.
-  if (
-    (pr.files ?? []).some((file) => dependencyPathReason(file.path)) &&
-    !(verdict?.securityCleared && verdict?.patchComplete)
-  ) {
-    return {
-      status: "review",
-      reason: "dependency changes require complete exact-head security clearance",
-    };
-  }
-  if (requiresCompletePatch(inspection) && !verdict?.patchComplete) {
-    return { status: "review", reason: "complete exact-head patch coverage required" };
-  }
+  const evidenceGap = passEvidenceGap(verdict, inspection, repo);
+  if (evidenceGap) return { status: "review", reason: evidenceGap };
   const activeThreads = actionableReviewThreads(reviewThreads);
   const coveredThreads = adjudicatedThreadsForHead(repairState, pr.headRefOid, activeThreads);
   if (activeThreads.length && coveredThreads.length !== activeThreads.length) {
@@ -3133,6 +3304,8 @@ function agentRepairReadiness(
     (check) => check.bucket === "fail" || check.bucket === "cancel",
   );
   if (failedChecks.length) return { status: "repair", reason: "checks failed after repair" };
+  const unreadable = requiredChecksBlocker(inspection);
+  if (unreadable) return { status: "waiting", reason: unreadable };
   if (!allRequiredSignalsGreen(resolutionChecks, inspection.requiredChecks ?? null)) {
     return { status: "waiting", reason: "waiting for exact-head checks" };
   }
@@ -3151,6 +3324,7 @@ function agentRepairReadiness(
       macroscopeApprovalBlocker(pr, checks, reviews, conversationComments, [], {
         checkTitles: inspection.macroscopeCheckTitles ?? {},
         agentVerdict: verdict,
+        approvabilityDisabled: macroscopeApprovabilityDisabled(repo),
       }) ?? githubMergeStateBlocker(pr);
     if (blocker) return { status: "waiting", reason: blocker };
     return { status: "ready", reason: "repair is verified" };
@@ -3281,7 +3455,12 @@ function autoMergeVerifiedPr({ repo, number, inspection, lane = "repair" }) {
         ...resolution,
         resolutionFailures: resolution.failures,
         ...(permissionFailure
-          ? { status: "paused", pausedSha: pr.headRefOid, reason: resolution.failures[0].reason }
+          ? {
+              status: "paused",
+              pauseKind: "sticky",
+              pausedSha: pr.headRefOid,
+              reason: resolution.failures[0].reason,
+            }
           : {}),
       });
       return {
@@ -3310,6 +3489,7 @@ function autoMergeVerifiedPr({ repo, number, inspection, lane = "repair" }) {
       writeRepairState(repo, number, {
         headSha: pr.headRefOid,
         status: "paused",
+        pauseKind: DERIVED_PAUSE_REASON.test(readiness.reason) ? "derived" : "sticky",
         pausedSha: pr.headRefOid,
         reason: readiness.reason,
       });
@@ -3571,6 +3751,7 @@ function autoRepairBlocker(
   stats,
   reviewThreads = [],
   conversationComments = [],
+  renamedFrom = [],
 ) {
   const [owner] = repo.split("/");
   const headOwner =
@@ -3583,8 +3764,8 @@ function autoRepairBlocker(
   // A PR that touches dependency files or workflows can still be repaired: the
   // repair's own diff may never touch them (see autoRepairPr), and the result needs
   // a fresh exact-head review before any merge.
-  const hardStopFiles = files
-    .map((file) => ({ path: file.path, reason: hardStopPathReason(file.path) }))
+  const hardStopFiles = [...files.map((file) => file.path), ...(renamedFrom ?? [])]
+    .map((path) => ({ path, reason: hardStopPathReason(path) }))
     .filter((file) => file.reason);
   const failedChecks = checks.filter(
     (check) => check.bucket === "fail" || check.bucket === "cancel",
@@ -3602,7 +3783,11 @@ function autoRepairBlocker(
   if (headOwner !== owner) return `head branch owner is ${headOwner}, not ${owner}`;
   if (pr.isCrossRepository) return "cross-repository PR";
   if (labels.some((label) => RISK_LABEL_PATTERN.test(label))) return "risk/pause label present";
-  if (isDependabotMajorUpdate(pr)) return DEPENDABOT_MAJOR_REASON;
+  const updateStop = dependabotUpdateStop(pr);
+  if (updateStop) return updateStop;
+  // A review that escalated stops repair as well as merge.
+  const verdict = latestExactHeadAgentVerdict(pr, conversationComments);
+  if (verdict?.escalation) return `agent review requires ${verdict.escalation}`;
   if (hardStopFiles.length) {
     return `sensitive paths changed: ${hardStopFiles
       .slice(0, 3)
@@ -3649,9 +3834,13 @@ function exactHeadReviewExcerpt(pr, comments = [], maxChars = 6000) {
   const verdict = latestExactHeadAgentVerdict(pr, comments);
   if (!verdict || verdict.verdict === "pass" || verdict.commentId == null) return "";
   const comment = comments.find((entry) => entry?.id === verdict.commentId);
-  const body = String(comment?.body ?? "")
-    .replaceAll(/<!--[\s\S]*?-->/g, "")
-    .trim();
+  // Strip hidden markers until none remain (nested openers cannot survive one pass).
+  let body = String(comment?.body ?? "");
+  for (let previous = ""; previous !== body; ) {
+    previous = body;
+    body = body.replaceAll(/<!--[\s\S]*?-->/g, "");
+  }
+  body = body.replaceAll("<!--", "").replaceAll("-->", "").trim();
   return body.length > maxChars ? `${body.slice(0, maxChars)}\n[truncated]` : body;
 }
 
@@ -3877,6 +4066,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     stats,
     reviewThreads,
     conversationComments,
+    inspection.renamedFrom ?? [],
   );
   if (blocker) return { action: "blocked", reason: blocker, continueToComment: true };
 
@@ -3977,6 +4167,7 @@ function autoRepairPr({ repo, number, model, inspection, codexTimeoutMs }) {
     writeRepairState(repo, number, {
       headSha: pr.headRefOid,
       status: evidence.escalation ? "paused" : "agent_owned",
+      pauseKind: evidence.escalation ? "sticky" : null,
       pushedSha: null,
       pausedSha: evidence.escalation ? pr.headRefOid : null,
       reason: evidence.summary,
@@ -4262,7 +4453,7 @@ function reviewItem({
     }
   }
   const reviewState = readReviewState(repo, number);
-  if (reviewStateIsCurrent(reviewState, inspection)) {
+  if (reviewStateIsCurrent(reviewState, inspection, repo)) {
     return {
       mode: "codex-quiescent",
       copied: [],
@@ -4287,6 +4478,9 @@ function reviewItem({
     headSha: inspection.pr.headRefOid,
     attemptFingerprint: evidenceFingerprint,
     attempts: reviewAttempts + 1,
+    // Carried so the bounded evidence-upgrade count survives the review run.
+    evidenceUpgrades:
+      reviewState.headSha === inspection.pr.headRefOid ? reviewState.evidenceUpgrades : undefined,
   });
   if (!codexEnabled) {
     const comment = deterministicFallbackComment(repo, number, "", inspection);
@@ -4463,6 +4657,8 @@ function reviewItem({
       headSha: inspection.pr.headRefOid,
       attemptFingerprint: evidenceFingerprint,
       attempts: reviewAttempts + 1,
+      evidenceUpgrades:
+        reviewState.headSha === inspection.pr.headRefOid ? reviewState.evidenceUpgrades : undefined,
       reason: reviewFailureReason(
         error,
         freshReviewFailureReport(failureReportPath, reviewStartedAt, previousReportMtime),
@@ -5227,6 +5423,10 @@ export {
   reviewThreadEvidence,
   sensitivePathReason,
   unvalidatedRepairWithinBounds,
+  captureReviewState,
+  dependabotUpdateStop,
+  passEvidenceGap,
+  reviewFreeLaneFingerprint,
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

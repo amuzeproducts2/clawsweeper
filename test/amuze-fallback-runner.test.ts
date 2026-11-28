@@ -80,6 +80,9 @@ import {
   writePrometheusTextfile,
   actionsJobIdFromLink,
   buildAutoRepairPrompt,
+  dependabotUpdateStop,
+  passEvidenceGap,
+  reviewFreeLaneFingerprint,
   dependabotUpdateClass,
   dependencyPathReason,
   effectiveRepairState,
@@ -1345,7 +1348,8 @@ test("repair change detection includes staged and untracked files", () => {
 
 function pullRequest(overrides = {}) {
   return {
-    title: "Repair the worker",
+    // Real Dependabot titles name the versions; the update size is read from them.
+    title: "chore(deps): bump example from 2.0.0 to 2.0.1",
     author: { login: "dependabot[bot]" },
     headRefOid: headSha,
     headRefName: "dependabot/npm_and_yarn/example-2.0.0",
@@ -1371,8 +1375,14 @@ function passingChecks() {
 
 // Dependabot as `gh pr view --json` reports it, with the metadata block Dependabot
 // writes into each commit message.
-function dependabotCommit({ kind = "patch", version = "2.0.1", login = "dependabot[bot]" } = {}) {
+function dependabotCommit({
+  kind = "patch",
+  version = "2.0.1",
+  login = "dependabot[bot]",
+  oid = "c1",
+} = {}) {
   return {
+    oid,
     authors: [{ login }],
     messageHeadline: "chore(deps): bump example from 2.0.0 to 2.0.1",
     messageBody: [
@@ -1405,6 +1415,7 @@ function dependabotPr(overrides = {}) {
 // A commit as REST /pulls/{n}/commits returns it for Dependabot's own commits.
 function signedDependabotCommit(overrides = {}) {
   return {
+    sha: "c1",
     author: { login: "dependabot[bot]", type: "Bot" },
     committer: { login: "web-flow" },
     commit: { verification: { verified: true, reason: "valid" } },
@@ -1599,7 +1610,7 @@ test("inspectPr finds verdict comment 101 and fails closed on malformed paginati
     body: [
       "SHIPRIGHT review passed.",
       "<!-- clawsweeper-review item=7 -->",
-      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high evidence=verified-v4 -->`,
+      `<!-- clawsweeper-verdict:pass item=7 sha=${headSha} confidence=high security=cleared patch=complete-v1 evidence=verified-v4 -->`,
     ].join("\n"),
   };
   writeFileSync(
@@ -4306,7 +4317,42 @@ test("dependency files are reviewable instead of human-only; the hard stops rema
   );
 });
 
-test("where Macroscope's approval check is off, a complete security-cleared agent pass stands in", () => {
+test("a missing Approvability check never waives Macroscope approval unless the repo is listed as off", () => {
+  const reviewedState = { status: "reviewed", reviewedSha: headSha };
+  const unlisted = agentRepairReadiness(
+    "amuzeproducts2/example",
+    7,
+    {
+      pr: pullRequest({
+        author: { login: "jaywillingham" },
+        reviewDecision: null,
+        mergeStateStatus: "CLEAN",
+        files: [{ path: "src/worker.ts" }],
+      }),
+      stats: { files: 1, additions: 2, deletions: 2 },
+      checks: macroscopeChecks({ approvability: false }),
+      reviewThreads: [],
+      conversationComments: [fullAgentPass()],
+      reviews: [],
+    },
+    reviewedState,
+    "routine",
+  );
+  // The check may simply not have started yet.
+  assert.deepEqual(unlisted, {
+    status: "waiting",
+    reason: "missing exact-head Macroscope approval",
+  });
+});
+
+test("where Macroscope's approval check is listed as off, a complete security-cleared agent pass stands in", (t) => {
+  const previous = process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS;
+  process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS =
+    "amuzeproducts2/other, amuzeproducts2/example";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS;
+    else process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS = previous;
+  });
   const reviewedState = { status: "reviewed", reviewedSha: headSha };
   const inspection = (changes = {}) => ({
     pr: pullRequest({
@@ -4332,10 +4378,10 @@ test("where Macroscope's approval check is off, a complete security-cleared agen
       "routine",
     );
   assert.equal(readiness().status, "ready");
-  // A plain pass is not enough.
+  // A plain pass is not enough: it asks for a stronger review instead of waiting forever.
   assert.deepEqual(readiness({ conversationComments: [agentPass()] }), {
-    status: "waiting",
-    reason: "missing exact-head Macroscope approval",
+    status: "review",
+    reason: "without Macroscope approval, a complete security-cleared review is required",
   });
   // Where Approvability runs, its decision binds: no substitution.
   assert.equal(readiness({ checks: macroscopeChecks() }).status, "waiting");
@@ -4691,4 +4737,342 @@ test("untested repairs stay small, never adjudicate threads, and keep the lineag
     2,
   );
   assert.equal(repairLineageAttempts(state, "unrelated"), 0);
+});
+
+// ---- fixes from the independent (Codex) review of this change ----
+
+test("only Macroscope's two review checks are judged apart; relays never count as CI", () => {
+  const ci = { name: "Node checks", state: "SUCCESS", bucket: "pass", workflow: "CI" };
+  const relay = {
+    name: "dispatch",
+    state: "SUCCESS",
+    bucket: "pass",
+    workflow: "ClawSweeper Dispatch",
+  };
+  // A required relay alone is not a CI signal.
+  assert.equal(allRequiredSignalsGreen([relay], [relay]), false);
+  assert.equal(allRequiredSignalsGreen([relay, ci], [relay]), true);
+  // Any other Macroscope check is an ordinary check: required and skipped blocks.
+  const extra = {
+    name: "Macroscope - Additional Validation",
+    state: "SKIPPED",
+    bucket: "skipping",
+  };
+  assert.equal(allRequiredSignalsGreen([ci, extra], [ci, extra]), false);
+  assert.equal(
+    allRequiredSignalsGreen([ci, { ...extra, state: "FAILURE", bucket: "fail" }], [ci]),
+    false,
+  );
+  // An unreadable required-check list means waiting.
+  const inspection = {
+    pr: pullRequest({
+      author: { login: "jaywillingham" },
+      reviewDecision: "APPROVED",
+      files: [{ path: "src/a.ts" }],
+    }),
+    stats: { files: 1, additions: 1, deletions: 1 },
+    checks: macroscopeChecks(),
+    requiredChecks: null,
+    requiredChecksUnavailable: true,
+    reviewThreads: [],
+    conversationComments: [fullAgentPass()],
+    reviews: macroscopeApproval(),
+  };
+  assert.deepEqual(
+    agentRepairReadiness(
+      "amuzeproducts2/example",
+      7,
+      inspection,
+      { status: "reviewed", reviewedSha: headSha },
+      "routine",
+    ),
+    { status: "waiting", reason: "required checks could not be read" },
+  );
+  assert.equal(
+    autoMergeDependabotBlocker(
+      dependabotPr(),
+      macroscopeChecks(),
+      { files: 1, additions: 1, deletions: 1 },
+      macroscopeApproval(),
+      [],
+      [],
+      {
+        pullCommits: [signedDependabotCommit()],
+        requiredChecksUnavailable: true,
+      },
+    ),
+    "required checks could not be read",
+  );
+});
+
+test("review-free lanes obey a negative exact-head review, hard stops and renames", () => {
+  const stats = { files: 1, additions: 1, deletions: 1 };
+  const block = (pr, comments = [], options = {}) =>
+    autoMergeDependabotBlocker(pr, macroscopeChecks(), stats, macroscopeApproval(), comments, [], {
+      pullCommits: [signedDependabotCommit()],
+      ...options,
+    });
+  const verdict = (name, extra = "") => ({
+    ...agentPass(),
+    body: agentPass()
+      .body.replace("verdict:pass", `verdict:${name}`)
+      .replace("evidence=", `${extra}evidence=`),
+  });
+  // Macroscope approved, but ClawSweeper asked for changes: repair, not merge.
+  const changes = block(dependabotPr(), [verdict("needs-changes")]);
+  assert.equal(changes, "exact-head review verdict is needs-changes");
+  assert.equal(mergeProgressionFlags(changes, macroscopeChecks(), []).needsRepair, true);
+  // An escalation or a needs-human verdict stops.
+  const escalated = block(dependabotPr(), [verdict("needs-changes", "escalation=business ")]);
+  assert.equal(escalated, "agent review requires business");
+  assert.deepEqual(mergeProgressionFlags(escalated, macroscopeChecks(), []), {
+    needsRepair: false,
+    needsAgentReview: false,
+  });
+  assert.equal(
+    block(dependabotPr(), [verdict("needs-human")]),
+    "exact-head review verdict is needs-human",
+  );
+  // A lockfile inside a deploy directory is a hard stop, in both review-free lanes.
+  const deployLock = dependabotPr({
+    files: [{ path: "deploy/package-lock.json", additions: 1, deletions: 1 }],
+  });
+  assert.equal(block(deployLock), "sensitive path changed: deploy/package-lock.json");
+  assert.equal(
+    autoMergeMacroscopeLowRiskBlocker(
+      pullRequest({
+        author: { login: "jaywillingham" },
+        reviewDecision: "APPROVED",
+        files: [{ path: "deploy/package-lock.json" }],
+      }),
+      macroscopeChecks(),
+      stats,
+      macroscopeApproval(),
+      [],
+      [],
+    ),
+    "sensitive path changed: deploy/package-lock.json",
+  );
+  // The old side of a rename counts; an unreadable rename list waits.
+  assert.equal(
+    block(dependabotPr(), [], { renamedFrom: ["migrations/0001.sql"] }),
+    "sensitive path changed: migrations/0001.sql",
+  );
+  assert.equal(block(dependabotPr(), [], { renamedFrom: null }), "renamed paths could not be read");
+  assert.match(
+    autoRepairBlocker(
+      "amuzeproducts2/example",
+      pullRequest({ author: { login: "jaywillingham" }, files: [{ path: "src/schema_notes.ts" }] }),
+      [{ name: "Node checks", state: "FAILURE", bucket: "fail" }],
+      [],
+      stats,
+      [],
+      [],
+      ["migrations/0001.sql"],
+    ),
+    /sensitive paths changed: migrations\/0001\.sql/,
+  );
+  // A red check does not start a repair once the review escalated.
+  assert.equal(
+    autoRepairBlocker(
+      "amuzeproducts2/example",
+      pullRequest({ author: { login: "jaywillingham" }, files: [{ path: "src/a.ts" }] }),
+      [{ name: "Node checks", state: "FAILURE", bucket: "fail" }],
+      [],
+      stats,
+      [],
+      [verdict("needs-changes", "escalation=permission ")],
+    ),
+    "agent review requires permission",
+  );
+});
+
+test("a Dependabot update of unknown size stops like a major one", () => {
+  const unsized = dependabotPr({
+    title: "chore(deps): bump the npm group across 2 directories with 3 updates",
+    commits: [dependabotCommit({ kind: null })],
+  });
+  assert.equal(dependabotUpdateStop(unsized), "dependency update size could not be determined");
+  assert.equal(
+    dependabotUpdateStop(
+      dependabotPr({
+        title: "chore(deps): update x requirement from >=1.0, <2.0 to >=2.0, <3.0",
+        commits: [dependabotCommit({ kind: null })],
+      }),
+    ),
+    "dependency update size could not be determined",
+  );
+  assert.equal(
+    dependabotUpdateStop(pullRequest({ author: { login: "jaywillingham" }, title: "Refactor" })),
+    null,
+  );
+  const result = agentRepairReadiness(
+    "amuzeproducts2/example",
+    7,
+    {
+      pr: { ...unsized, mergeStateStatus: "CLEAN" },
+      stats: { files: 1, additions: 1, deletions: 1 },
+      checks: macroscopeChecks(),
+      reviewThreads: [],
+      conversationComments: [fullAgentPass()],
+      reviews: macroscopeApproval(),
+    },
+    { status: "reviewed", reviewedSha: headSha },
+    "routine",
+  );
+  assert.deepEqual(result, {
+    status: "human",
+    reason: "dependency update size could not be determined",
+  });
+});
+
+test("Dependabot commit evidence must be the inspected commits", () => {
+  const pr = dependabotPr();
+  assert.equal(githubVerifiedDependabotCommits(pr, [signedDependabotCommit()]), true);
+  assert.equal(
+    githubVerifiedDependabotCommits(pr, [signedDependabotCommit({ sha: "other" })]),
+    false,
+  );
+  assert.equal(
+    githubVerifiedDependabotCommits(pr, [{ ...signedDependabotCommit(), sha: undefined }]),
+    false,
+  );
+});
+
+test("free text can never release a sticky pause", () => {
+  // A worker's summary that happens to read like a derived reason stays sticky.
+  const workerPause = {
+    status: "paused",
+    pauseKind: "sticky",
+    headSha,
+    reviewedSha: headSha,
+    pausedSha: headSha,
+    reason: "draft PR",
+  };
+  assert.equal(effectiveRepairState(workerPause, headSha).status, "paused");
+  // Legacy records (no pauseKind) are released only on an exact derived reason.
+  const legacy = {
+    ...workerPause,
+    pauseKind: undefined,
+    reason: "draft PR: the owner must decide pricing",
+  };
+  assert.equal(effectiveRepairState(legacy, headSha).status, "paused");
+  assert.equal(
+    effectiveRepairState({ ...legacy, reason: "sensitive path changed: requirements.txt" }, headSha)
+      .status,
+    "reviewed",
+  );
+  assert.equal(
+    effectiveRepairState(
+      { ...legacy, pauseKind: "derived", reason: "risk/pause label present" },
+      headSha,
+    ).status,
+    "reviewed",
+  );
+});
+
+test("a pass that lacks required evidence re-arms a bounded number of reviews", () => {
+  const inspection = {
+    pr: pullRequest({ author: { login: "jaywillingham" }, files: [{ path: "requirements.txt" }] }),
+    checks: passingChecks(),
+    conversationComments: [agentPass()],
+    reviews: [],
+    reviewThreads: [],
+  };
+  assert.equal(
+    passEvidenceGap(
+      latestExactHeadAgentVerdict(inspection.pr, inspection.conversationComments),
+      inspection,
+    ),
+    "dependency changes require complete exact-head security clearance",
+  );
+  const state = (evidenceUpgrades) => ({
+    status: "complete",
+    verdict: "pass",
+    headSha,
+    evidenceFingerprint: mergeSignalFingerprint(inspection),
+    evidenceUpgrades,
+  });
+  // Readiness asks for a stronger review, so quiescence must not skip it ...
+  assert.equal(reviewStateIsCurrent(state(0), inspection), false);
+  assert.equal(reviewStateIsCurrent(state(1), inspection), false);
+  // ... but not forever: after two upgrade reviews the PR waits with its reason.
+  assert.equal(reviewStateIsCurrent(state(2), inspection), true);
+  // A complete security-cleared pass has no gap, so its review is simply current.
+  const full = { ...inspection, conversationComments: [fullAgentPass()] };
+  assert.equal(
+    reviewStateIsCurrent({ ...state(0), evidenceFingerprint: mergeSignalFingerprint(full) }, full),
+    true,
+  );
+});
+
+test("a cached review-free blocker is re-evaluated when GitHub's merge state or fetched evidence changes", () => {
+  const inspection = {
+    pr: dependabotPr({ mergeStateStatus: "BLOCKED" }),
+    checks: macroscopeChecks(),
+    reviews: macroscopeApproval(),
+    conversationComments: [],
+    reviewThreads: [],
+    requiredChecks: [],
+    pullCommits: [signedDependabotCommit()],
+    macroscopeCheckTitles: {},
+    renamedFrom: [],
+  };
+  const base = reviewFreeLaneFingerprint(inspection);
+  assert.equal(
+    mergeSignalFingerprint(inspection),
+    mergeSignalFingerprint({ ...inspection, pr: { ...inspection.pr, mergeStateStatus: "CLEAN" } }),
+  );
+  for (const changed of [
+    { pr: { ...inspection.pr, mergeStateStatus: "CLEAN" } },
+    { requiredChecksUnavailable: true },
+    { renamedFrom: null },
+    { pullCommits: null },
+    {
+      macroscopeCheckTitles: { "Macroscope - Correctness Check": "No code objects were reviewed." },
+    },
+  ]) {
+    assert.notEqual(
+      reviewFreeLaneFingerprint({ ...inspection, ...changed }),
+      base,
+      JSON.stringify(changed),
+    );
+  }
+});
+
+test("an explicit Macroscope refusal binds even where the fallback would apply", (t) => {
+  const previous = process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS;
+  process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS = "amuzeproducts2/example";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS;
+    else process.env.CLAWSWEEPER_MACROSCOPE_APPROVABILITY_OFF_REPOS = previous;
+  });
+  const pr = pullRequest({
+    author: { login: "jaywillingham" },
+    reviewDecision: null,
+    files: [{ path: "src/a.ts" }],
+  });
+  const refusal = [
+    { user: { login: "macroscopeapp[bot]" }, state: "CHANGES_REQUESTED", commit_id: headSha },
+  ];
+  const options = {
+    agentVerdict: { verdict: "pass", patchComplete: true, securityCleared: true },
+    approvabilityDisabled: true,
+  };
+  const checks = macroscopeChecks({ approvability: false });
+  assert.equal(macroscopeApprovalBlocker(pr, checks, [], [], [], options), null);
+  assert.equal(
+    macroscopeApprovalBlocker(pr, checks, refusal, [], [], options),
+    "latest exact-head Macroscope review is CHANGES_REQUESTED",
+  );
+  // Hidden markers are stripped completely from the review text given to the worker.
+  const comment = {
+    ...agentPass(),
+    body:
+      agentPass().body.replace("verdict:pass", "verdict:needs-changes") +
+      "\nFix it.<!<!---->-- hidden -->",
+  };
+  const excerpt = exactHeadReviewExcerpt(pr, [comment]);
+  assert.match(excerpt, /Fix it\./);
+  assert.doesNotMatch(excerpt, /<!--|-->/);
 });
