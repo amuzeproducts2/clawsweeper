@@ -39,6 +39,12 @@ repository or unchanged pull-request head to monopolize every cycle.
   lease, and the item becomes eligible again after expiry. A caught failure
   clears the lease but retains the advanced cursor and retry eligibility.
 
+## Merge rules
+
+What merges without a person, what goes to the independent agent review
+instead, and what still stops are listed in `docs/amuze-merge-rules.md`
+(approved 2026-11-28), together with the rollout and rollback steps.
+
 ## Review quiescence
 
 The runner stores the exact head SHA and a fingerprint of checks, review
